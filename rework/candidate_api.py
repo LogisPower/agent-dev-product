@@ -10,6 +10,10 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager,asynccontextmanager
 
+class JobRetry(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    expected_version:int=Field(ge=1)
+
 class MessageCreate(BaseModel):
     model_config=ConfigDict(extra="forbid")
     content:str=Field(min_length=1,max_length=12000)
@@ -140,7 +144,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     def understanding_jobs(project:str,permissions=Depends(scope)):
         allowed(project,permissions)
         with db() as connection:
-            rows=connection.execute('SELECT id,status,attempts,last_error,result FROM logis_candidate.understanding_jobs WHERE project_id=%s ORDER BY created_at DESC LIMIT 20',(project,)).fetchall()
+            rows=connection.execute('SELECT j.id,j.status,j.attempts,j.last_error,j.result,j.version,j.created_at,j.completed_at,left(m.content,240) AS message_preview FROM logis_candidate.understanding_jobs j JOIN logis_candidate.messages m ON m.id=j.id JOIN logis_candidate.sources s ON s.id=m.source_id WHERE j.project_id=%s AND s.deleted_at IS NULL ORDER BY j.created_at DESC LIMIT 20',(project,)).fetchall()
             sources={r['id']:r['payload'].get('content','') for r in connection.execute('SELECT id,payload FROM logis_candidate.sources WHERE project_id=%s AND deleted_at IS NULL',(project,))}
             for row in rows:
                 if row['result']:
@@ -150,6 +154,27 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             saved={r['idempotency_key']:r['kind'] for r in connection.execute('SELECT r.idempotency_key,o.kind FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id JOIN logis_candidate.objects o ON o.id=e.object_id WHERE r.idempotency_key=ANY(%s) AND o.project_id=%s',(keys,project))}
             for item in items:item['saved']=saved.get(project+':extraction-'+item['suggestion_key'])==item['kind']
             return rows
+    @app.post('/api/projects/{project}/understanding/jobs/{identifier}/retry')
+    def retry_understanding(project:str,identifier:str,body:JobRetry,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
+        allowed(project,permissions)
+        if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        fingerprint=hashlib.sha256(json.dumps({'operation':'retry_understanding','project':project,'id':identifier,'version':body.expected_version},sort_keys=True).encode()).hexdigest()
+        receipt_key=project+':'+idempotency_key
+        with db(False) as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(project,))
+            prior=connection.execute('SELECT e.payload FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id WHERE r.idempotency_key=%s',(receipt_key,)).fetchone()
+            if prior:
+                if prior['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used')
+                return {'id':identifier,'queued':True,'replayed':True}
+            job=connection.execute('SELECT j.* FROM logis_candidate.understanding_jobs j JOIN logis_candidate.messages m ON m.id=j.id JOIN logis_candidate.sources s ON s.id=m.source_id WHERE j.id=%s AND j.project_id=%s AND s.deleted_at IS NULL FOR UPDATE OF j',(identifier,project)).fetchone()
+            if not job:raise HTTPException(404,'Processing job not found')
+            if job['status']!='failed' or job['version']!=body.expected_version:raise HTTPException(409,'Processing status changed; refresh before retrying')
+            version=job['version']+1;event=uuid.uuid4().hex
+            connection.execute("UPDATE logis_candidate.understanding_jobs SET version=%s,status='pending',attempts=0,available_at=now(),lease_until=NULL,lease_token=NULL,last_error=NULL,result=NULL,completed_at=NULL WHERE id=%s",(version,identifier))
+            connection.execute("INSERT INTO logis_candidate.events(event_id,event_type,object_id,actor_id,correlation_id,permissions_scope,payload) VALUES(%s,'understanding.retried',%s,%s,%s,%s,%s)",(event,identifier,permissions.get('actor','local-user'),receipt_key,project,Jsonb({'version':version,'request_hash':fingerprint,'prior_attempts':job['attempts']})))
+            connection.execute('INSERT INTO logis_candidate.outbox(event_id) VALUES(%s)',(event,))
+            connection.execute('INSERT INTO logis_candidate.operation_receipts VALUES(%s,%s)',(receipt_key,event))
+            return {'id':identifier,'queued':True,'replayed':False}
     @app.post('/api/projects/{identifier}/understanding')
     def understanding(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)

@@ -12,20 +12,20 @@ class UnderstandingWorker(ConnectionProvider):
     def claim(self,identifier=None):
         token=uuid.uuid4().hex
         with self.connect() as db:
-            db.execute("UPDATE logis_candidate.understanding_jobs SET status='failed',last_error='LeaseExpired',lease_until=NULL,lease_token=NULL WHERE status='running' AND attempts>=3 AND lease_until<now()")
+            db.execute("UPDATE logis_candidate.understanding_jobs SET version=version+1,status='failed',last_error='LeaseExpired',lease_until=NULL,lease_token=NULL WHERE status='running' AND attempts>=3 AND lease_until<now()")
             row=db.execute("SELECT * FROM logis_candidate.understanding_jobs WHERE attempts<3 AND status IN ('pending','running') AND available_at<=now() AND (lease_until IS NULL OR lease_until<now()) AND (%s::text IS NULL OR id=%s) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",(identifier,identifier)).fetchone()
             if not row:return None
-            db.execute("UPDATE logis_candidate.understanding_jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '120 seconds',lease_token=%s WHERE id=%s",(token,row['id']))
+            db.execute("UPDATE logis_candidate.understanding_jobs SET version=version+1,status='running',attempts=attempts+1,lease_until=now()+interval '120 seconds',lease_token=%s WHERE id=%s",(token,row['id']))
             return {**row,'token':token}
     def complete(self,claim,result):
         with self.connect() as db:
             # Revalidate source visibility after inference, which runs outside the DB transaction.
             sources={r['id']:r['payload'].get('content','') for r in db.execute('SELECT id,payload FROM logis_candidate.sources WHERE project_id=%s AND deleted_at IS NULL',(claim['project_id'],))}
             result={**result,'items':[x for x in result['items'] if x['source_id'] in sources and x['quote'] in sources[x['source_id']]]}
-            return bool(db.execute("UPDATE logis_candidate.understanding_jobs SET status='completed',result=%s,completed_at=now(),last_error=NULL,lease_until=NULL,lease_token=NULL WHERE id=%s AND lease_token=%s RETURNING id",(Jsonb(result),claim['id'],claim['token'])).fetchone())
+            return bool(db.execute("UPDATE logis_candidate.understanding_jobs SET version=version+1,status='completed',result=%s,completed_at=now(),last_error=NULL,lease_until=NULL,lease_token=NULL WHERE id=%s AND lease_token=%s RETURNING id",(Jsonb(result),claim['id'],claim['token'])).fetchone())
     def fail(self,claim,error):
         with self.connect() as db:
-            db.execute("UPDATE logis_candidate.understanding_jobs SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,last_error=%s,available_at=now()+make_interval(secs=>LEAST(300,attempts*10)),lease_until=NULL,lease_token=NULL WHERE id=%s AND lease_token=%s",(type(error).__name__,claim['id'],claim['token']))
+            db.execute("UPDATE logis_candidate.understanding_jobs SET version=version+1,status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,last_error=%s,available_at=now()+make_interval(secs=>LEAST(300,attempts*10)),lease_until=NULL,lease_token=NULL WHERE id=%s AND lease_token=%s",(type(error).__name__,claim['id'],claim['token']))
     def process(self,claim):
         with self.connect() as db:
             rows=db.execute("SELECT m.source_id,m.role,m.content FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND m.role='user' AND s.deleted_at IS NULL AND m.legacy_index<=(SELECT legacy_index FROM logis_candidate.messages WHERE id=%s) ORDER BY m.legacy_index DESC LIMIT 12",(claim['project_id'],claim['id'])).fetchall()

@@ -45,7 +45,7 @@ try:
  objects.append(saved.json()['id'])
  assert next(x for x in client.get('/api/projects/'+first+'/understanding/jobs',headers=headers).json() if x['id']==identifier)['result']['items'][0]['saved']
  with psycopg.connect(dsn) as db:db.execute('UPDATE logis_candidate.sources SET deleted_at=now() WHERE id=%s',(sources[0],))
- assert next(x for x in client.get('/api/projects/'+first+'/understanding/jobs',headers=headers).json() if x['id']==identifier)['result']['items']==[]
+ assert not any(x['id']==identifier for x in client.get('/api/projects/'+first+'/understanding/jobs',headers=headers).json())
  failed=client.post(url,json={'content':content},headers={**headers,'Idempotency-Key':uuid.uuid4().hex}).json()['id'];ids.append(failed);sources.append('message-'+failed)
  for attempt in range(3):
   claim=worker.claim(failed);assert claim
