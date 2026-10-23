@@ -1,0 +1,18 @@
+BEGIN;
+CREATE SCHEMA IF NOT EXISTS logis_candidate;
+CREATE TABLE IF NOT EXISTS logis_candidate.schema_migrations(version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS logis_candidate.projects(id text PRIMARY KEY, name text NOT NULL, archived boolean NOT NULL DEFAULT false, context_policy jsonb NOT NULL DEFAULT '{}', legacy_payload jsonb NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS logis_candidate.sources(id text PRIMARY KEY, project_id text NOT NULL REFERENCES logis_candidate.projects(id), kind text NOT NULL, checksum text NOT NULL, revision integer NOT NULL DEFAULT 1 CHECK(revision>0), payload jsonb NOT NULL, deleted_at timestamptz);
+CREATE TABLE IF NOT EXISTS logis_candidate.messages(id text PRIMARY KEY, project_id text NOT NULL REFERENCES logis_candidate.projects(id), source_id text NOT NULL UNIQUE REFERENCES logis_candidate.sources(id), legacy_index integer NOT NULL, role text NOT NULL CHECK(role IN ('user','assistant','system','tool')), content text NOT NULL, UNIQUE(project_id,legacy_index));
+CREATE TABLE IF NOT EXISTS logis_candidate.objects(id text PRIMARY KEY, kind text NOT NULL, project_id text REFERENCES logis_candidate.projects(id), version integer NOT NULL DEFAULT 1 CHECK(version>0), status text NOT NULL, payload jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), search_document tsvector GENERATED ALWAYS AS (to_tsvector('english',coalesce(payload->>'title','') || ' ' || coalesce(payload->>'detail',''))) STORED);
+CREATE INDEX IF NOT EXISTS objects_search ON logis_candidate.objects USING gin(search_document);
+CREATE INDEX IF NOT EXISTS objects_project_kind ON logis_candidate.objects(project_id,kind,status);
+CREATE TABLE IF NOT EXISTS logis_candidate.evidence(object_id text NOT NULL REFERENCES logis_candidate.objects(id), source_id text NOT NULL REFERENCES logis_candidate.sources(id), source_revision integer NOT NULL CHECK(source_revision>0), quote text NOT NULL, active boolean NOT NULL DEFAULT true, PRIMARY KEY(object_id,source_id,quote));
+CREATE TABLE IF NOT EXISTS logis_candidate.relationships(from_id text NOT NULL REFERENCES logis_candidate.objects(id), to_id text NOT NULL REFERENCES logis_candidate.objects(id), relation text NOT NULL, PRIMARY KEY(from_id,to_id,relation));
+CREATE TABLE IF NOT EXISTS logis_candidate.runs(id text PRIMARY KEY, project_id text NOT NULL REFERENCES logis_candidate.projects(id), agent_id text, status text NOT NULL, payload jsonb NOT NULL, occurrence_key text UNIQUE);
+CREATE TABLE IF NOT EXISTS logis_candidate.approvals(id text PRIMARY KEY, project_id text NOT NULL REFERENCES logis_candidate.projects(id), run_id text REFERENCES logis_candidate.runs(id), status text NOT NULL CHECK(status IN ('pending','running','approved','rejected','completed','failed')), action_hash text NOT NULL, payload jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS logis_candidate.events(event_id text PRIMARY KEY, event_type text NOT NULL, object_id text NOT NULL, actor_id text NOT NULL, timestamp timestamptz NOT NULL DEFAULT now(), correlation_id text NOT NULL, schema_version integer NOT NULL DEFAULT 1, permissions_scope text NOT NULL, payload jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS logis_candidate.outbox(event_id text PRIMARY KEY REFERENCES logis_candidate.events(event_id), attempts integer NOT NULL DEFAULT 0, available_at timestamptz NOT NULL DEFAULT now(), delivered_at timestamptz, last_error text);
+CREATE TABLE IF NOT EXISTS logis_candidate.operation_receipts(idempotency_key text PRIMARY KEY, event_id text NOT NULL REFERENCES logis_candidate.events(event_id));
+INSERT INTO logis_candidate.schema_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
+COMMIT;

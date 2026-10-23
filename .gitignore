@@ -1,0 +1,15 @@
+Data/
+Projects/
+Trash/
+runtime/
+PC Files/
+node_modules/
+deps/
+__pycache__/
+*.log
+*.pid
+*.sqlite*
+*.dpapi
+.env*
+*token*
+*auth*.json
