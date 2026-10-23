@@ -47,6 +47,7 @@ jobs:
       - run: python rework/bootstrap_ci.py
       - run: python rework/test_candidate_api.py
       - run: python rework/test_compatibility_reads.py
+      - run: python rework/test_personal_memory.py
       - run: python rework/test_understanding_retry.py
       - run: python rework/test_message_pipeline.py
       - run: python rework/test_conversation_understanding.py

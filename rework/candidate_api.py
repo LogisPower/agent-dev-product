@@ -20,7 +20,7 @@ class MessageCreate(BaseModel):
 
 class RecordCreate(BaseModel):
     model_config=ConfigDict(extra="forbid")
-    kind:str=Field(pattern="^(tasks|decisions)$")
+    kind:str=Field(pattern="^(tasks|decisions|preferences|goals)$")
     title:str=Field(min_length=1,max_length=180)
     detail:str=Field(default="",max_length=12000)
     status:str=Field(default="draft",pattern="^(draft|open)$")
@@ -30,7 +30,7 @@ class RecordCreate(BaseModel):
 class RecordUpdate(BaseModel):
     model_config=ConfigDict(extra="forbid")
     expected_version:int=Field(ge=1)
-    status:str=Field(pattern="^(draft|open|in_progress|done|archived)$")
+    status:str=Field(pattern="^(draft|open|in_progress|done|archived|confirmed)$")
     title:str=Field(min_length=1,max_length=180)
     detail:str=Field(default="",max_length=12000)
 
@@ -189,7 +189,12 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     @app.get('/api/projects/{identifier}/objects')
     def objects(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
-        with db() as connection:return connection.execute('SELECT id,kind,version,status,payload FROM logis_candidate.objects WHERE project_id=%s ORDER BY id',(identifier,)).fetchall()
+        with db() as connection:return connection.execute("SELECT o.id,o.kind,o.version,o.status,o.payload FROM logis_candidate.objects o WHERE o.project_id=%s AND (o.kind NOT IN ('preferences','goals') OR EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=o.project_id AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0)) ORDER BY o.id",(identifier,)).fetchall()
+    @app.get('/api/projects/{project}/memory')
+    def personal_memory(project:str,permissions=Depends(scope)):
+        allowed(project,permissions)
+        with db() as connection:
+            return connection.execute("SELECT o.id,o.kind,o.version,o.payload FROM logis_candidate.objects o WHERE o.project_id=%s AND o.kind IN ('preferences','goals') AND o.status='confirmed' AND EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=%s AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0) ORDER BY o.updated_at DESC",(project,project)).fetchall()
     @app.get('/api/sources/{identifier}')
     def source(identifier:str,permissions=Depends(scope)):
         with db() as connection:
@@ -208,6 +213,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     def create_record(project:str,body:RecordCreate,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
         allowed(project,permissions)
         if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        if body.kind in ('preferences','goals') and (not body.source_id or not body.quote or body.status!='draft'):raise HTTPException(422,'Personal memory requires source evidence and starts as a draft')
         if bool(body.source_id)!=bool(body.quote):raise HTTPException(422,'Provide both source and quote')
         fingerprint=hashlib.sha256(json.dumps({'operation':'create','project':project,'body':body.model_dump()},sort_keys=True).encode()).hexdigest()
         receipt_key=project+':'+idempotency_key
@@ -244,6 +250,12 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
                 return {'event_id':receipt['event_id'],'version':receipt['payload']['version'],'replayed':True}
             old=connection.execute('SELECT version,payload,kind FROM logis_candidate.objects WHERE id=%s AND project_id=%s FOR UPDATE',(identifier,project)).fetchone()
             if not old:raise HTTPException(404,'Object not found')
+            if old['kind'] in ('preferences','goals'):
+                if body.status not in ('draft','confirmed','archived'):raise HTTPException(422,'Invalid memory status')
+                if body.status=='confirmed':
+                    evidence=connection.execute("SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=%s AND e.active AND s.deleted_at IS NULL AND s.project_id=%s AND e.source_revision=s.revision AND position(e.quote in coalesce(s.payload->>'content',''))>0 LIMIT 1",(identifier,project)).fetchone()
+                    if not evidence:raise HTTPException(409,'Memory source is missing or changed; review it again')
+            elif body.status=='confirmed':raise HTTPException(422,'Only personal memory can be confirmed')
             if old['version']!=body.expected_version:raise HTTPException(409,'Record changed; reload before editing')
             version=old['version']+1;payload={**old['payload'],'title':body.title,'detail':body.detail,'status':body.status}
             connection.execute('UPDATE logis_candidate.objects SET version=%s,status=%s,payload=%s,updated_at=now() WHERE id=%s',(version,body.status,Jsonb(payload),identifier))
