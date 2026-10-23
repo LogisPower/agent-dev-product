@@ -13,3 +13,12 @@ __pycache__/
 .env*
 *token*
 *auth*.json
+
+**/preview-access.json
+**/*-test-fixture.json
+**/candidate-import.json
+rework/postgres-restore-*/
+rework/recovery/
+rework/rehearsals/
+rework/vector-restore-check/
+rework/*-report.json

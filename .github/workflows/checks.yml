@@ -17,3 +17,45 @@ jobs:
       - run: node --check app.js && node --check workspace.js
       - run: python rework/test_records.py
       - run: python rework/test_recursive_context.py
+      - run: python rework/test_model_response.py
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: logis_restore
+          POSTGRES_PASSWORD: ci-disposable-only
+          POSTGRES_DB: postgres
+          PGDATA: /var/lib/postgresql/rework/postgres-restore-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U logis_restore"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      LOGIS_TEST_DSN: host=127.0.0.1 port=5432 user=logis_restore password=ci-disposable-only dbname=postgres connect_timeout=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --target rework/deps -r rework/requirements.lock.txt
+      - run: python rework/bootstrap_ci.py
+      - run: python rework/test_candidate_api.py
+      - run: python rework/test_compatibility_reads.py
+      - run: python rework/test_memory_replacement.py
+      - run: python rework/test_personal_memory.py
+      - run: python rework/test_understanding_retry.py
+      - run: python rework/test_message_pipeline.py
+      - run: python rework/test_conversation_understanding.py
+      - run: python rework/test_candidate_create.py
+      - run: python rework/test_candidate_writes.py
+      - run: python rework/test_outbox_worker.py
+      - run: python rework/test_event_feed.py
+      - run: python rework/test_source_access.py
+      - run: python rework/test_worker_lifecycle.py
