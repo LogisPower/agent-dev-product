@@ -1,0 +1,43 @@
+# Phased rework status
+
+Started: baseline source snapshot and isolated canonical-store prototype.
+
+Source archive has been reopened and every member hash checked. This is not a full user-data backup: live Paperclip PostgreSQL, Qdrant, project databases/files, credentials and Windows-bound encrypted profile require a coordinated backup and isolated restore procedure before production migration.
+
+The candidate store implements stable object IDs, optimistic versions, idempotent operation receipts and transactional outbox events. Tests cover replay deduplication and stale-write rollback. Production remains on the existing data store; no dual-write migration has been enabled.
+
+Next gate: implement and verify consistent backup/restore, import legacy IDs into a candidate database, reconcile counts/links, then introduce the API compatibility layer. No original files were removed.
+
+Migration rehearsal passed: 128 objects from 24 project/trash state files, with 7 evidence links preserved. Candidate restore integrity, payload equality, version preservation and import replay deduplication passed. No source state files changed during capture. Production remains untouched. Full-system recovery still needs Paperclip PostgreSQL, Qdrant, artifacts/attachments and secret recovery coverage.
+
+Recovery extension passed: 201 project/trash/PC Files assets restored to an isolated directory and hash-verified; 16 SQLite databases backed up using SQLite's backup API and integrity-checked. No errors or file changes detected during capture. Latest available Paperclip SQL dump copied and gzip integrity checked; PostgreSQL restore is not yet verified. These are component backups, not a coordinated point-in-time system snapshot. Qdrant recovery and secret/DPAPI recovery remain open.
+
+Normal Windows account verification confirmed by user: Qdrant restored collection access and Windows DPAPI round-trip passed. Isolated PostgreSQL restore runner prepared for port 55439; it restores the SQL dump, checks expected tables/row counts, then stops only its own cluster. Awaiting normal-account run.
+
+PostgreSQL isolated restore passed: latest selected Paperclip dump restored with 242 tables, including one company, agent, issue and routine. Test report confirms productionModified=false. Test cluster received its shutdown request. Qdrant restore and Windows-account encryption checks also passed under the normal Windows account. These tests verify component recovery, not a coordinated full-system snapshot or portable DPAPI recovery.
+
+Canonical PostgreSQL schema created and tested in an isolated restore cluster only. Imported 24 projects, 96 messages with deterministic stable IDs, 8 workspace objects and 7 foreign-key-linked evidence records. Row counts and preserved project payloads verified. Repeated import passed without duplicate rows. Production unchanged. Next: candidate API and policy tests, followed by transactional event/write tests before UI cutover.
+
+FastAPI candidate read API implemented with scoped bearer credentials, read-only database transactions and a guard against production database paths. Seven checks passed against isolated PostgreSQL: missing/invalid credentials, scoped project listing, allowed message read, denied cross-project messages/objects, and disabled writes. Candidate dependencies isolated under rework/deps with a version lock. No production routes changed. This is a tested candidate, not a deployed authentication system or full API compatibility replacement.
+
+Candidate PATCH record updates implemented and tested against isolated PostgreSQL. Verified scoped writes, read-only denial, replay deduplication, conflicting idempotency-key denial, stale-version rollback, and one transactional event/outbox entry. Existing read authorization tests also passed. Candidate only; no production routes changed. Feature branch: feature/canonical-writes. Next: outbox consumer delivery/acknowledgement and compatibility routing.
+
+Outbox candidate implemented and tested on isolated PostgreSQL: exclusive leases, worker crash after consumer commit, duplicate delivery receipts, stale acknowledgement rejection, exponential retry delay and dead-letter isolation. Consumer updates and receipts are transactional. This gives at-least-once delivery with an idempotent local DB consumer, not exactly-once external side effects. Production tabs and background service are not yet connected.
+
+Candidate scoped event feed implemented with monotonic projection sequence and reconnect cursor. Feed producer serializes projection commits to prevent late lower-sequence commits being skipped by reconnecting clients. PostgreSQL tests passed for authentication, project filtering, pagination, catch-up without duplicates, unauthorized project denial and invalid cursor rejection. Outbox and write regressions also passed. This is cursor-based catch-up, not yet browser SSE or production UI integration.
+
+Candidate preview served at loopback port 8092 with Missions and Activity views, project selector, scoped bearer access and cursor polling. Live HTTP checks verified preview delivery and authenticated project/object retrieval; embedded JavaScript syntax passed. Browser click-through and visual tests remain outstanding. Event worker is not yet supervised continuously. Preview credentials remain local and are excluded from the source repository.
+
+Browser interaction verified against supervised candidate service: automatic task arrival in Missions, matching Activity event, project switching, rejected credentials clearing data, reconnect catch-up without duplicates. Worker lifecycle tests passed for transient error recovery and shutdown. Feed/outbox regressions passed. Screenshot and browser report saved locally. Candidate remains separate from production. Newest clear-on-project-change refinement passed syntax/source review; production UI not migrated.
+
+Editable candidate workflow verified in browser: task saved via scoped PATCH, activity updated automatically, unsaved draft survived incoming event, stale save rejected without overwriting newer version. Candidate server restarted; version 3, done status and three unique history events persisted. Production unchanged. UI remains a narrow preview, not the final presentation design.
+
+Candidate Decisions view and source inspector added. Browser verified evidence quote and original test source opening. API tests passed for authorized sources, evidence linkage, cross-project denial and deleted-source exclusion. Message reads now filter deleted sources. Record-write regression passed. UI styling refined after screenshot. Production remains unchanged.
+
+Published candidate rework to GitHub feature/canonical-writes and opened draft PR #2. Added disposable PostgreSQL CI with synthetic projects only. Local six-script integration suite passed. GitHub push workflow completed successfully; PR-triggered check status inspected separately. No merge, deployment or production migration performed.
+
+Compatibility read slice implemented: scoped project search, legacy-style conversation snapshot and nine record views. Canonical history parity and cross-project denial verified. Unsupported workspace routes return 501; response capabilities explicitly disable unconnected generation/files. Candidate only; production UI has not switched backends.
+
+Compatibility reads published to draft PR #2 in commit 8df6b6d9c3ade55aceb2e5707b1ee305fb42091e. Added compatibility integration job coverage and fixed feed-test contention with the active supervised worker. Local compatibility/write/feed tests passed. New GitHub checks pending at publication; production remains unchanged.
+
+Candidate task and decision creation implemented with scoped writes, atomic event/outbox/receipt, idempotent replay and validated optional source quotes. Browser verified both creations and automatic Activity sync. Corrected decision labels and prevented pending refreshes from replacing an active edit form. API creation tests passed; production remains unchanged.

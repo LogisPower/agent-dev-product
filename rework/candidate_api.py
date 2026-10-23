@@ -10,6 +10,15 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager,asynccontextmanager
 
+class RecordCreate(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    kind:str=Field(pattern="^(tasks|decisions)$")
+    title:str=Field(min_length=1,max_length=180)
+    detail:str=Field(default="",max_length=12000)
+    status:str=Field(default="draft",pattern="^(draft|open)$")
+    source_id:str|None=Field(default=None,max_length=200)
+    quote:str|None=Field(default=None,min_length=5,max_length=4000)
+
 class RecordUpdate(BaseModel):
     model_config=ConfigDict(extra="forbid")
     expected_version:int=Field(ge=1)
@@ -104,6 +113,32 @@ def create_app(dsn,credentials,run_worker=False):
             if not obj:raise HTTPException(404,'Object not found')
             allowed(obj['project_id'],permissions)
             return connection.execute('SELECT e.source_id,e.source_revision,e.quote,e.active FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=%s AND s.project_id=ANY(%s) AND s.deleted_at IS NULL',(identifier,permissions.get('projects',[]))).fetchall()
+    @app.post('/api/projects/{project}/objects')
+    def create_record(project:str,body:RecordCreate,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
+        allowed(project,permissions)
+        if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        if bool(body.source_id)!=bool(body.quote):raise HTTPException(422,'Provide both source and quote')
+        fingerprint=hashlib.sha256(json.dumps({'operation':'create','project':project,'body':body.model_dump()},sort_keys=True).encode()).hexdigest()
+        receipt_key=project+':'+idempotency_key
+        with db(False) as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(project,))
+            prior=connection.execute('SELECT e.event_id,e.object_id,e.payload FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id WHERE r.idempotency_key=%s',(receipt_key,)).fetchone()
+            if prior:
+                if prior['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used')
+                return {'id':prior['object_id'],'event_id':prior['event_id'],'version':1,'replayed':True}
+            if not connection.execute('SELECT id FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone():raise HTTPException(404,'Project not found')
+            source=None
+            if body.source_id:
+                source=connection.execute('SELECT revision,payload FROM logis_candidate.sources WHERE id=%s AND project_id=%s AND deleted_at IS NULL',(body.source_id,project)).fetchone()
+                if not source:raise HTTPException(404,'Source not found')
+                if body.quote not in source['payload'].get('content',''):raise HTTPException(422,'Quote does not match source')
+            identifier=uuid.uuid4().hex[:16];event=uuid.uuid4().hex
+            connection.execute('INSERT INTO logis_candidate.objects(id,kind,project_id,status,payload) VALUES(%s,%s,%s,%s,%s)',(identifier,body.kind,project,body.status,Jsonb({'title':body.title,'detail':body.detail})))
+            if source:connection.execute('INSERT INTO logis_candidate.evidence VALUES(%s,%s,%s,%s,true)',(identifier,body.source_id,source['revision'],body.quote))
+            connection.execute('INSERT INTO logis_candidate.events(event_id,event_type,object_id,actor_id,correlation_id,permissions_scope,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)',(event,body.kind+'.created',identifier,permissions.get('actor','local-user'),receipt_key,project,Jsonb({'version':1,'request_hash':fingerprint})))
+            connection.execute('INSERT INTO logis_candidate.outbox(event_id) VALUES(%s)',(event,))
+            connection.execute('INSERT INTO logis_candidate.operation_receipts VALUES(%s,%s)',(receipt_key,event))
+            return {'id':identifier,'event_id':event,'version':1,'replayed':False}
     @app.patch('/api/projects/{project}/objects/{identifier}')
     def update(project:str,identifier:str,body:RecordUpdate,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
         allowed(project,permissions)
