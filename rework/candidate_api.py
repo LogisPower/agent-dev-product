@@ -61,8 +61,27 @@ def create_app(dsn,credentials,run_worker=False):
     @app.get('/health')
     def health():return {'service':'logis-candidate','mode':'scoped','worker':dict(worker_state)}
     @app.get('/api/projects')
-    def projects(permissions=Depends(scope)):
-        with db() as connection:return connection.execute('SELECT id,name,archived FROM logis_candidate.projects WHERE id=ANY(%s) ORDER BY name',(permissions.get('projects',[]),)).fetchall()
+    def projects(q:str=Query(default='',max_length=200),permissions=Depends(scope)):
+        with db() as connection:
+            rows=connection.execute('SELECT id,name,archived,legacy_payload FROM logis_candidate.projects WHERE id=ANY(%s) ORDER BY name',(permissions.get('projects',[]),)).fetchall()
+            return [{'id':x['id'],'name':x['name'],'archived':x['archived'],'kind':x['legacy_payload'].get('kind','project'),'updated':x['legacy_payload'].get('updated'),'running':False,'preview':''} for x in rows if q.casefold() in x['name'].casefold()]
+    @app.get('/api/state')
+    def legacy_state(id:str,permissions=Depends(scope)):
+        allowed(id,permissions)
+        with db() as connection:
+            project=connection.execute('SELECT * FROM logis_candidate.projects WHERE id=%s',(id,)).fetchone()
+            if not project:raise HTTPException(404,'Project not found')
+            rows=connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(id,)).fetchall()
+            legacy=project['legacy_payload']
+            return {'id':id,'name':project['name'],'kind':legacy.get('kind','project'),'brief':legacy.get('brief',''),'history':rows,'checkpoint':{},'context_policy':project['context_policy'],'job':None,'capabilities':{'conversation_read':True,'generation':False,'files':False},'migration_notice':'Imported conversation snapshot; live generation and file services are not connected.'}
+    @app.get('/api/workspace')
+    def legacy_workspace(view:str,permissions=Depends(scope)):
+        supported={'tasks','decisions','cases','routines','pipelines','agents','skills','org','conference'}
+        if view=='projects':return projects('',permissions)
+        if view not in supported:raise HTTPException(501,'This workspace view has not been migrated')
+        with db() as connection:
+            rows=connection.execute('SELECT id,kind,project_id,version,status,payload FROM logis_candidate.objects WHERE project_id=ANY(%s) AND kind=%s ORDER BY updated_at DESC,id',(permissions.get('projects',[]),view)).fetchall()
+            return [{**x['payload'],'id':x['id'],'kind':x['kind'],'project_id':x['project_id'],'version':x['version'],'status':x['status']} for x in rows]
     @app.get('/api/projects/{identifier}/messages')
     def messages(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)

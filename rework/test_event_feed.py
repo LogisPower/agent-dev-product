@@ -1,4 +1,4 @@
-import sys,uuid
+import sys,uuid,time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).parent/'deps'))
 from test_candidate_api import dsn,first,second
@@ -17,7 +17,15 @@ try:
   with psycopg.connect(dsn) as db:
    db.execute('INSERT INTO logis_candidate.events(event_id,event_type,object_id,actor_id,correlation_id,permissions_scope,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)',(identifier,'test.updated','test-object','test',identifier,project,Jsonb({'version':1})))
    db.execute('INSERT INTO logis_candidate.outbox(event_id) VALUES(%s)',(identifier,))
-  claim=worker.claim(identifier);worker.project(claim);worker.acknowledge(claim)
+  claim=worker.claim(identifier)
+  if claim:worker.project(claim);worker.acknowledge(claim)
+  else:
+   deadline=time.monotonic()+8
+   while True:
+    with psycopg.connect(dsn) as db:delivered=db.execute('SELECT delivered_at IS NOT NULL FROM logis_candidate.outbox WHERE event_id=%s',(identifier,)).fetchone()[0]
+    if delivered:break
+    if time.monotonic()>deadline:raise TimeoutError('Background event delivery did not complete')
+    time.sleep(.05)
  client=TestClient(create_app(dsn,{'reader':{'projects':[first]}}));headers={'Authorization':'Bearer reader'}
  assert client.get('/api/events').status_code==401
  page=client.get('/api/events',params={'after':cursor,'limit':1},headers=headers).json()
@@ -30,4 +38,5 @@ try:
  print('PASS: scoped feed, pagination, reconnect cursor, no duplicate catch-up, unauthorized project denial, invalid cursor rejection')
 finally:
  with psycopg.connect(dsn) as db:
+  db.execute("SELECT pg_advisory_xact_lock(hashtext('logis-activity-feed'))")
   for table in ['activity_projection','consumer_receipts','outbox','events']:db.execute('DELETE FROM logis_candidate.'+table+' WHERE event_id=ANY(%s)',(ids,))
