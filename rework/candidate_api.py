@@ -10,6 +10,10 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager,asynccontextmanager
 
+class MessageCreate(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    content:str=Field(min_length=1,max_length=12000)
+
 class RecordCreate(BaseModel):
     model_config=ConfigDict(extra="forbid")
     kind:str=Field(pattern="^(tasks|decisions)$")
@@ -30,9 +34,10 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     if not credentials:raise ValueError('Configure scoped credentials')
     worker_state={'status':'disabled','processed':0}
     extraction_slot=threading.BoundedSemaphore(1)
+    understanding_state={'status':'disabled'}
     @asynccontextmanager
     async def lifespan(app):
-        stop=threading.Event();thread=None
+        stop=threading.Event();thread=None;understanding_thread=None
         if run_worker:
             from outbox_worker import Worker
             worker=Worker(dsn)
@@ -45,10 +50,22 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
                     except Exception as error:
                         worker_state.update(status='retrying',error_type=type(error).__name__);stop.wait(2)
             thread=threading.Thread(target=supervise,daemon=True,name='logis-candidate-outbox');thread.start()
+            from understanding_worker import UnderstandingWorker
+            understanding_worker=UnderstandingWorker(dsn,request_model,extraction_slot)
+            def supervise_understanding():
+                while not stop.is_set():
+                    try:
+                        processed=understanding_worker.once();understanding_state['status']='running'
+                        stop.wait(0.5 if processed else 2)
+                    except Exception:
+                        understanding_state['status']='retrying';stop.wait(2)
+            understanding_thread=threading.Thread(target=supervise_understanding,daemon=True,name='logis-candidate-understanding');understanding_thread.start()
         try:yield
         finally:
             stop.set()
             if thread:thread.join(timeout=8)
+            if understanding_thread:understanding_thread.join(timeout=2)
+            understanding_state['status']='stopping' if understanding_thread and understanding_thread.is_alive() else 'stopped'
             worker_state['status']='stopped' if not thread or not thread.is_alive() else 'stopping'
     app=FastAPI(title='Logis candidate API',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.worker_status=worker_state
@@ -69,7 +86,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     @app.get('/preview',response_class=HTMLResponse)
     def preview():return (Path(__file__).parent/'candidate-preview.html').read_text(encoding='utf-8')
     @app.get('/health')
-    def health():return {'service':'logis-candidate','mode':'scoped','worker':dict(worker_state)}
+    def health():return {'service':'logis-candidate','mode':'scoped','worker':dict(worker_state),'understanding_worker':dict(understanding_state)}
     @app.get('/api/projects')
     def projects(q:str=Query(default='',max_length=200),permissions=Depends(scope)):
         with db() as connection:
@@ -83,7 +100,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             if not project:raise HTTPException(404,'Project not found')
             rows=connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(id,)).fetchall()
             legacy=project['legacy_payload']
-            return {'id':id,'name':project['name'],'kind':legacy.get('kind','project'),'brief':legacy.get('brief',''),'history':rows,'checkpoint':{},'context_policy':project['context_policy'],'job':None,'capabilities':{'conversation_read':True,'generation':False,'files':False},'migration_notice':'Imported conversation snapshot; live generation and file services are not connected.'}
+            return {'id':id,'name':project['name'],'kind':legacy.get('kind','project'),'brief':legacy.get('brief',''),'history':rows,'checkpoint':{},'context_policy':project['context_policy'],'job':None,'capabilities':{'conversation_read':True,'conversation_write':bool(permissions.get('write')),'generation':False,'files':False},'migration_notice':'Imported conversation snapshot; live generation and file services are not connected.'}
     @app.get('/api/workspace')
     def legacy_workspace(view:str,permissions=Depends(scope)):
         supported={'tasks','decisions','cases','routines','pipelines','agents','skills','org','conference'}
@@ -96,6 +113,43 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     def messages(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
         with db() as connection:return connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(identifier,)).fetchall()
+    @app.post('/api/projects/{project}/messages')
+    def append_message(project:str,body:MessageCreate,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
+        allowed(project,permissions)
+        if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        if not body.content.strip():raise HTTPException(422,'Message is empty')
+        fingerprint=hashlib.sha256(json.dumps({'operation':'message','project':project,'content':body.content},sort_keys=True).encode()).hexdigest()
+        receipt_key=project+':'+idempotency_key
+        with db(False) as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(project,))
+            prior=connection.execute('SELECT e.object_id,e.payload FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id WHERE r.idempotency_key=%s',(receipt_key,)).fetchone()
+            if prior:
+                if prior['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used')
+                return {'id':prior['object_id'],'queued':True,'replayed':True}
+            if not connection.execute('SELECT id FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone():raise HTTPException(404,'Project not found')
+            identifier=uuid.uuid4().hex;source='message-'+identifier;event=uuid.uuid4().hex
+            index=connection.execute('SELECT coalesce(max(legacy_index),-1)+1 AS next FROM logis_candidate.messages WHERE project_id=%s',(project,)).fetchone()['next']
+            connection.execute("INSERT INTO logis_candidate.sources(id,project_id,kind,checksum,payload) VALUES(%s,%s,'conversation',%s,%s)",(source,project,hashlib.sha256(body.content.encode()).hexdigest(),Jsonb({'content':body.content})))
+            connection.execute("INSERT INTO logis_candidate.messages VALUES(%s,%s,%s,%s,'user',%s)",(identifier,project,source,index,body.content))
+            connection.execute('INSERT INTO logis_candidate.understanding_jobs(id,project_id) VALUES(%s,%s)',(identifier,project))
+            connection.execute("INSERT INTO logis_candidate.events(event_id,event_type,object_id,actor_id,correlation_id,permissions_scope,payload) VALUES(%s,'messages.created',%s,%s,%s,%s,%s)",(event,identifier,permissions.get('actor','local-user'),receipt_key,project,Jsonb({'version':1,'request_hash':fingerprint})))
+            connection.execute('INSERT INTO logis_candidate.outbox(event_id) VALUES(%s)',(event,))
+            connection.execute('INSERT INTO logis_candidate.operation_receipts VALUES(%s,%s)',(receipt_key,event))
+            return {'id':identifier,'queued':True,'replayed':False}
+    @app.get('/api/projects/{project}/understanding/jobs')
+    def understanding_jobs(project:str,permissions=Depends(scope)):
+        allowed(project,permissions)
+        with db() as connection:
+            rows=connection.execute('SELECT id,status,attempts,last_error,result FROM logis_candidate.understanding_jobs WHERE project_id=%s ORDER BY created_at DESC LIMIT 20',(project,)).fetchall()
+            sources={r['id']:r['payload'].get('content','') for r in connection.execute('SELECT id,payload FROM logis_candidate.sources WHERE project_id=%s AND deleted_at IS NULL',(project,))}
+            for row in rows:
+                if row['result']:
+                    row['result']['items']=[x for x in row['result']['items'] if x['source_id'] in sources and x['quote'] in sources[x['source_id']]]
+            items=[item for row in rows if row['result'] for item in row['result']['items']]
+            keys=[project+':extraction-'+item['suggestion_key'] for item in items]
+            saved={r['idempotency_key']:r['kind'] for r in connection.execute('SELECT r.idempotency_key,o.kind FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id JOIN logis_candidate.objects o ON o.id=e.object_id WHERE r.idempotency_key=ANY(%s) AND o.project_id=%s',(keys,project))}
+            for item in items:item['saved']=saved.get(project+':extraction-'+item['suggestion_key'])==item['kind']
+            return rows
     @app.post('/api/projects/{identifier}/understanding')
     def understanding(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
