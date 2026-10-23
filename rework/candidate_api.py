@@ -1,4 +1,4 @@
-"""Isolated read-only candidate API; production routing is not changed."""
+"""Isolated candidate API; production routing is not changed."""
 import sys,os,json,hmac,hashlib,uuid,threading,time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).parent/'deps'))
@@ -26,9 +26,10 @@ class RecordUpdate(BaseModel):
     title:str=Field(min_length=1,max_length=180)
     detail:str=Field(default="",max_length=12000)
 
-def create_app(dsn,credentials,run_worker=False):
+def create_app(dsn,credentials,run_worker=False,request_model=None):
     if not credentials:raise ValueError('Configure scoped credentials')
     worker_state={'status':'disabled','processed':0}
+    extraction_slot=threading.BoundedSemaphore(1)
     @asynccontextmanager
     async def lifespan(app):
         stop=threading.Event();thread=None
@@ -95,6 +96,17 @@ def create_app(dsn,credentials,run_worker=False):
     def messages(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
         with db() as connection:return connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(identifier,)).fetchall()
+    @app.post('/api/projects/{identifier}/understanding')
+    def understanding(identifier:str,permissions=Depends(scope)):
+        allowed(identifier,permissions)
+        if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        with db() as connection:
+            rows=connection.execute("SELECT m.source_id,m.role,m.content FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND m.role='user' AND s.deleted_at IS NULL ORDER BY m.legacy_index DESC LIMIT 12",(identifier,)).fetchall()
+        from conversation_understanding import suggest,local_model
+        if not extraction_slot.acquire(blocking=False):raise HTTPException(429,'Conversation extraction is already running')
+        try:return suggest(list(reversed(rows)),request_model or local_model)
+        except Exception:raise HTTPException(502,'Conversation extraction unavailable; no records were created')
+        finally:extraction_slot.release()
     @app.get('/api/projects/{identifier}/objects')
     def objects(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
