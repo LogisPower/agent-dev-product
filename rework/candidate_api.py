@@ -10,6 +10,12 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager,asynccontextmanager
 
+class MemoryReplacement(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    replacement_id:str=Field(min_length=1,max_length=200)
+    expected_version:int=Field(ge=1)
+    replacement_version:int=Field(ge=1)
+
 class JobRetry(BaseModel):
     model_config=ConfigDict(extra="forbid")
     expected_version:int=Field(ge=1)
@@ -189,12 +195,44 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     @app.get('/api/projects/{identifier}/objects')
     def objects(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
-        with db() as connection:return connection.execute("SELECT o.id,o.kind,o.version,o.status,o.payload FROM logis_candidate.objects o WHERE o.project_id=%s AND (o.kind NOT IN ('preferences','goals') OR EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=o.project_id AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0)) ORDER BY o.id",(identifier,)).fetchall()
+        with db() as connection:return connection.execute("SELECT o.id,o.kind,o.version,o.status,o.payload,(SELECT r.from_id FROM logis_candidate.relationships r WHERE r.to_id=o.id AND r.relation='supersedes' LIMIT 1) AS replaced_by,(SELECT r.to_id FROM logis_candidate.relationships r WHERE r.from_id=o.id AND r.relation='supersedes' LIMIT 1) AS replaces FROM logis_candidate.objects o WHERE o.project_id=%s AND (o.kind NOT IN ('preferences','goals') OR EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=o.project_id AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0)) ORDER BY o.id",(identifier,)).fetchall()
     @app.get('/api/projects/{project}/memory')
     def personal_memory(project:str,permissions=Depends(scope)):
         allowed(project,permissions)
         with db() as connection:
-            return connection.execute("SELECT o.id,o.kind,o.version,o.payload FROM logis_candidate.objects o WHERE o.project_id=%s AND o.kind IN ('preferences','goals') AND o.status='confirmed' AND EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=%s AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0) ORDER BY o.updated_at DESC",(project,project)).fetchall()
+            return connection.execute("SELECT o.id,o.kind,o.version,o.payload FROM logis_candidate.objects o WHERE o.project_id=%s AND o.kind IN ('preferences','goals') AND o.status='confirmed' AND NOT EXISTS(SELECT 1 FROM logis_candidate.relationships r WHERE r.to_id=o.id AND r.relation='supersedes') AND EXISTS(SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=o.id AND e.active AND s.project_id=%s AND s.deleted_at IS NULL AND s.revision=e.source_revision AND position(e.quote in coalesce(s.payload->>'content',''))>0) ORDER BY o.updated_at DESC",(project,project)).fetchall()
+    @app.post('/api/projects/{project}/memory/{identifier}/replace')
+    def replace_memory(project:str,identifier:str,body:MemoryReplacement,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
+        allowed(project,permissions)
+        if not permissions.get('write'):raise HTTPException(403,'Read-only credentials')
+        if identifier==body.replacement_id:raise HTTPException(422,'Choose a different draft memory')
+        fingerprint=hashlib.sha256(json.dumps({'operation':'replace_memory','project':project,'id':identifier,'body':body.model_dump()},sort_keys=True).encode()).hexdigest()
+        receipt_key=project+':'+idempotency_key
+        with db(False) as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(project,))
+            prior=connection.execute('SELECT e.event_id,e.payload FROM logis_candidate.operation_receipts r JOIN logis_candidate.events e ON e.event_id=r.event_id WHERE r.idempotency_key=%s',(receipt_key,)).fetchone()
+            if prior:
+                if prior['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used')
+                return {'id':body.replacement_id,'event_id':prior['event_id'],'version':prior['payload']['version'],'replayed':True}
+            rows=connection.execute('SELECT * FROM logis_candidate.objects WHERE project_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE',(project,[identifier,body.replacement_id])).fetchall()
+            by_id={x['id']:x for x in rows}
+            if len(by_id)!=2:raise HTTPException(404,'Memory not found')
+            old,new=by_id[identifier],by_id[body.replacement_id]
+            if old['kind'] not in ('preferences','goals') or old['kind']!=new['kind']:raise HTTPException(422,'Replace a memory with a draft of the same type')
+            if old['version']!=body.expected_version or new['version']!=body.replacement_version:raise HTTPException(409,'Memory changed; refresh before replacing')
+            if old['status']!='confirmed' or new['status']!='draft':raise HTTPException(409,'Choose a confirmed memory and a new draft')
+            if connection.execute("SELECT 1 FROM logis_candidate.relationships WHERE to_id=%s AND relation='supersedes'",(identifier,)).fetchone():raise HTTPException(409,'This memory was already replaced')
+            if connection.execute("SELECT 1 FROM logis_candidate.relationships WHERE (from_id=%s OR to_id=%s) AND relation='supersedes'",(new['id'],new['id'])).fetchone():raise HTTPException(409,'Choose a new draft without replacement history')
+            evidence=connection.execute("SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=%s AND e.active AND s.deleted_at IS NULL AND s.project_id=%s AND e.source_revision=s.revision AND position(e.quote in coalesce(s.payload->>'content',''))>0 LIMIT 1",(new['id'],project)).fetchone()
+            if not evidence:raise HTTPException(409,'Replacement source is missing or changed')
+            old_version=old['version']+1;version=new['version']+1;event=uuid.uuid4().hex
+            connection.execute("UPDATE logis_candidate.objects SET status='archived',version=%s,payload=payload||%s,updated_at=now() WHERE id=%s",(old_version,Jsonb({'status':'archived'}),identifier))
+            connection.execute("UPDATE logis_candidate.objects SET status='confirmed',version=%s,payload=payload||%s,updated_at=now() WHERE id=%s",(version,Jsonb({'status':'confirmed'}),new['id']))
+            connection.execute("INSERT INTO logis_candidate.relationships VALUES(%s,%s,'supersedes')",(new['id'],identifier))
+            connection.execute("INSERT INTO logis_candidate.events(event_id,event_type,object_id,actor_id,correlation_id,permissions_scope,payload) VALUES(%s,'memory.replaced',%s,%s,%s,%s,%s)",(event,new['id'],permissions.get('actor','local-user'),receipt_key,project,Jsonb({'version':version,'previous_id':identifier,'previous_version':old_version,'request_hash':fingerprint})))
+            connection.execute('INSERT INTO logis_candidate.outbox(event_id) VALUES(%s)',(event,))
+            connection.execute('INSERT INTO logis_candidate.operation_receipts VALUES(%s,%s)',(receipt_key,event))
+            return {'id':new['id'],'event_id':event,'version':version,'replayed':False}
     @app.get('/api/sources/{identifier}')
     def source(identifier:str,permissions=Depends(scope)):
         with db() as connection:
@@ -251,6 +289,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             old=connection.execute('SELECT version,payload,kind FROM logis_candidate.objects WHERE id=%s AND project_id=%s FOR UPDATE',(identifier,project)).fetchone()
             if not old:raise HTTPException(404,'Object not found')
             if old['kind'] in ('preferences','goals'):
+                if connection.execute("SELECT 1 FROM logis_candidate.relationships WHERE to_id=%s AND relation='supersedes'",(identifier,)).fetchone():raise HTTPException(409,'This memory was replaced; edit the current memory instead')
                 if body.status not in ('draft','confirmed','archived'):raise HTTPException(422,'Invalid memory status')
                 if body.status=='confirmed':
                     evidence=connection.execute("SELECT 1 FROM logis_candidate.evidence e JOIN logis_candidate.sources s ON s.id=e.source_id WHERE e.object_id=%s AND e.active AND s.deleted_at IS NULL AND s.project_id=%s AND e.source_revision=s.revision AND position(e.quote in coalesce(s.payload->>'content',''))>0 LIMIT 1",(identifier,project)).fetchone()

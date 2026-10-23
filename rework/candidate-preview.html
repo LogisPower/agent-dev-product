@@ -10,26 +10,41 @@ async function records(g){
  $('records').replaceChildren();
  const selected=rows.filter(x=>recordKind==='memory'?['preferences','goals'].includes(x.kind):recordKind==='tasks'?['tasks','task'].includes(x.kind):['decisions','decision'].includes(x.kind));
  if(recordKind==='memory'){
-  const intro=document.createElement('p');intro.textContent='Review what Logis may remember for this project. Drafts need your confirmation.';$('records').append(intro);
+  const intro=document.createElement('p');intro.textContent='Review what Logis may remember for this project. Drafts need your confirmation. To correct an entry, save a new draft and replace the old memory.';$('records').append(intro);
  }
  for(const group of (recordKind==='memory'?['preferences','goals']:[recordKind])){
-  const section=document.createElement('section');
+  const section=document.createElement('section'),history=document.createElement('details'),historyTitle=document.createElement('summary');historyTitle.textContent='Replaced memories';history.append(historyTitle);
   if(recordKind==='memory'){const heading=document.createElement('h2');heading.textContent=group==='preferences'?'Preferences':'Goals';section.append(heading)}
   for(const x of selected.filter(x=>recordKind!=='memory'||x.kind===group)){
    const card=document.createElement('article'),title=document.createElement('h3'),state=document.createElement('p'),edit=document.createElement('button'),evidence=document.createElement('button');
    title.textContent=x.payload.title||x.id;state.textContent=x.status+' · version '+x.version;
    edit.textContent='Edit '+kindLabel(x.kind).toLowerCase();edit.onclick=()=>openEditor(card,x);
-   evidence.textContent='View evidence';evidence.onclick=()=>showEvidence(x.id);card.append(title,state,edit,evidence);
-   if(recordKind==='memory'&&x.status==='draft'){
+   evidence.textContent='View evidence';evidence.onclick=()=>showEvidence(x.id);card.append(title,state);if(!x.replaced_by)card.append(edit);card.append(evidence);
+   if(x.replaced_by)state.textContent='Replaced by '+(rows.find(r=>r.id===x.replaced_by)?.payload.title||'a newer memory');
+   if(x.replaces){const previous=document.createElement('p');previous.textContent='Replaces: '+(rows.find(r=>r.id===x.replaces)?.payload.title||'an earlier memory');card.append(previous)}
+   if(recordKind==='memory'&&x.status==='draft'&&!x.replaced_by){
     const confirm=document.createElement('button');confirm.textContent='Confirm memory';const key=crypto.randomUUID();
     confirm.onclick=async()=>{confirm.disabled=true;try{
      await api('/api/projects/'+encodeURIComponent(project)+'/objects/'+encodeURIComponent(x.id),{method:'PATCH',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({expected_version:x.version,title:x.payload.title,detail:x.payload.detail||'',status:'confirmed'})});
      if(g===generation){await records(g);await poll()}
     }catch(e){state.textContent=e.message;confirm.disabled=false}};card.append(confirm);
+    const candidates=selected.filter(r=>r.kind===x.kind&&r.status==='confirmed'&&!r.replaced_by&&r.id!==x.id);
+    if(candidates.length){
+     const label=document.createElement('p'),choice=document.createElement('select'),replace=document.createElement('button'),blank=document.createElement('option');
+     label.textContent='Does this correct an existing memory?';choice.setAttribute('aria-label','Memory to replace for '+x.payload.title);blank.value='';blank.textContent='Select memory to correct';choice.append(blank);
+     for(const candidate of candidates){const option=document.createElement('option');option.value=candidate.id;option.textContent=candidate.payload.title;choice.append(option)}
+     replace.textContent='Replace selected memory';replace.disabled=true;let key=crypto.randomUUID();
+     choice.onchange=()=>{key=crypto.randomUUID();replace.disabled=!choice.value};
+     replace.onclick=async()=>{const old=candidates.find(r=>r.id===choice.value);if(!old||g!==generation)return;choice.disabled=true;replace.disabled=true;try{
+      await api('/api/projects/'+encodeURIComponent(project)+'/memory/'+encodeURIComponent(old.id)+'/replace',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({replacement_id:x.id,expected_version:old.version,replacement_version:x.version})});
+      if(g===generation){await records(g);await poll()}
+     }catch(e){state.textContent=e.message;choice.disabled=false;replace.disabled=false}};card.append(label,choice,replace);
+    }
    }
-   section.append(card);
+   if(x.replaced_by)history.append(card);else section.append(card);
   }
-  if(!selected.some(x=>recordKind!=='memory'||x.kind===group)){const empty=document.createElement('p');empty.textContent='No records in this view.';section.append(empty)}
+  if(!selected.some(x=>(recordKind!=='memory'||x.kind===group)&&!x.replaced_by)){const empty=document.createElement('p');empty.textContent='No records in this view.';section.append(empty)}
+  if(history.children.length>1)section.append(history);
   $('records').append(section);
  }
 }

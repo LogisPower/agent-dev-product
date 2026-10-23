@@ -1,12 +1,41 @@
 """Bounded local extraction. Results are reviewable drafts, never execution instructions."""
 import json, hashlib, urllib.request
 
+class ModelOutputTruncated(ValueError):pass
+class ModelResponseInvalid(ValueError):pass
+
 def local_model(messages):
-    body=json.dumps({'messages':messages,'temperature':0,'max_tokens':1400,'stream':False}).encode()
+    # Leave answer space beyond the installed model's 2048-token reasoning budget.
+    # Thinking settings stay under the model server's control.
+    body=json.dumps({'messages':messages,'temperature':0,'max_tokens':4096,'stream':False,
+                     'response_format':{'type':'json_object'}}).encode()
     request=urllib.request.Request('http://127.0.0.1:8081/v1/chat/completions',data=body,headers={'Content-Type':'application/json'})
     with urllib.request.urlopen(request,timeout=90) as response:
-        value=json.loads(response.read(256000))
-    return value['choices'][0]['message']['content']
+        raw=response.read(256001)
+    if len(raw)>256000:raise ModelResponseInvalid('Model response exceeds size limit')
+    try:
+        value=json.loads(raw);choice=value['choices'][0]
+        if choice.get('finish_reason')=='length':raise ModelOutputTruncated('Model exhausted its output budget')
+        if choice.get('finish_reason')!='stop':raise ModelResponseInvalid('Model did not finish normally')
+        content=choice['message']['content']
+        if not isinstance(content,str) or not content.strip():raise ModelResponseInvalid('Model returned no answer')
+        return content
+    except (KeyError,IndexError,TypeError,AttributeError,json.JSONDecodeError) as error:
+        raise ModelResponseInvalid('Invalid model response envelope') from error
+
+def parse_response(response):
+    if not isinstance(response,str) or len(response)>256000:raise ModelResponseInvalid('Invalid extraction response')
+    text=response.strip()
+    # Accept a complete fenced document; never turn fragments into factual memory.
+    if text.startswith('```'):
+        lines=text.splitlines()
+        if len(lines)<3 or lines[0].lower() not in ('```','```json') or lines[-1]!='```':
+            raise ModelResponseInvalid('Incomplete JSON fence')
+        text='\n'.join(lines[1:-1])
+    try:value=json.loads(text)
+    except json.JSONDecodeError as error:raise ModelResponseInvalid('Model returned invalid JSON') from error
+    if not isinstance(value,dict) or not isinstance(value.get('items'),list):raise ModelResponseInvalid('Invalid extraction response')
+    return value
 
 def suggest(rows,request_model=local_model):
     # Whole messages only: never quote a fragment without preserving its original source ID.
@@ -27,10 +56,7 @@ def suggest(rows,request_model=local_model):
         'Preferences and goals must be explicitly about the speaker, not other people. Do not treat a temporary instruction as an enduring preference. '
         'Do not invent dates, owners, completed work or decisions. All results are drafts requiring user review, never approved actions.'},
         {'role':'user','content':json.dumps(data)}])
-    text=response.strip()
-    if text.startswith('```'):text=text.split('\n',1)[1].rsplit('```',1)[0]
-    value=json.loads(text)
-    if not isinstance(value,dict) or not isinstance(value.get('items'),list):raise ValueError('Invalid extraction response')
+    value=parse_response(response)
     sources={r['source_id']:r for r in chosen};items=[];seen=set()
     for item in value['items'][:12]:
         if not isinstance(item,dict):continue

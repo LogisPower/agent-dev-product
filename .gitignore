@@ -21,3 +21,4 @@ rework/postgres-restore-*/
 rework/recovery/
 rework/rehearsals/
 rework/vector-restore-check/
+rework/*-report.json
