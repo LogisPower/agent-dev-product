@@ -89,7 +89,7 @@ function renderJobHistory(jobs,g,selectedProject){
   card.append(heading,message,note);
   if(job.status==='failed'){
    const reason=document.createElement('p'),retry=document.createElement('button');
-   reason.textContent=({TimeoutError:'The local model timed out.',URLError:'The local model could not be reached.',JSONDecodeError:'The model response could not be understood.',LeaseExpired:'Processing was interrupted.'})[job.last_error]||'Processing could not finish.';
+   reason.textContent=({TimeoutError:'The local model timed out.',URLError:'The local model could not be reached.',ConnectionRefusedError:'The local model could not be reached.',JSONDecodeError:'The model response could not be understood.',ModelResponseInvalid:'The model returned an incomplete or invalid answer. No suggestions were saved from it.',ModelOutputTruncated:'The model ran out of output space. No partial memories were saved. Retry after checking the model settings.',LeaseExpired:'Processing was interrupted.'})[job.last_error]||'Processing could not finish.';
    retry.textContent='Retry processing';const key=crypto.randomUUID();
    retry.onclick=async()=>{retry.disabled=true;try{
     await api('/api/projects/'+encodeURIComponent(selectedProject)+'/understanding/jobs/'+encodeURIComponent(job.id)+'/retry',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({expected_version:job.version})});
