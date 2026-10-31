@@ -110,6 +110,8 @@ class LocalWorkLoop:
             if callable(prepare):prepare(request,attempt,timeout=min(self.timeout,120),stopping=self.worker.stop.is_set)
             attempt.check()
             if not self.authorize(attempt.task):raise PermissionError('Scope withdrawn during admission')
+            from local_analysis import verify_evidence
+            verify_evidence(self,attempt.task['project'],(payload.get('_plan') or {}).get('_analysis_evidence'))
             if str(self.files(attempt.task['project']).root)!=payload['_root']:raise PermissionError('Workspace binding changed during admission')
             for target in payload['targets']:files.verify(target['path'],target['expected_sha256'])
             for dep in attempt.task['dependencies']:files.verify(dep['path'],dep['sha256'])

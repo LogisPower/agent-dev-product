@@ -33,3 +33,14 @@ about 65 KB), including retained files. No binary/oversized artifact, known toke
 format, private key, personal username or private machine origin was detected.
 The one literal-secret scan match is a synthetic test fixture. Pattern scanning
 is a check, not a guarantee of exhaustive secret detection.
+
+
+Follow-up staged checkpoint `d0812c5` connects the recovered recursive reducer to
+read-only analysis, the original Tasks UI and separately approved exact edits.
+Twenty-nine focused synthetic analysis/API/planner checks and the expanded UI DOM
+fixture passed. Source drift is checked again before dispatch; mixed-writer use
+is explicitly unavailable. Bonsai supplied six verified planner edits, with the
+remaining guards completed in review. Live recursive inference was not exercised.
+CI profile-path configuration and the stale compatibility assertion were fixed
+on this PR; both hosted workflows passed at commit `a27367f`. The subsequent
+recursive integration has its own hosted CI run, not covered by that earlier result.

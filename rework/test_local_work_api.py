@@ -123,6 +123,19 @@ class LocalWorkApiTests(unittest.TestCase):
         self.assertEqual(accepted.json()['tasks'][0]['status'],'approval')
         self.assertEqual((self.root/'a.txt').read_bytes(),b'before');self.assertEqual(self.provider.calls,[])
         self.assertTrue(self.client.get(self.base,headers=self.headers).json()['planning_enabled'])
+    def test_analysis_is_scoped_readonly_and_not_automatically_accepted(self):
+        import json
+        from local_planner import LocalPlanner
+        LocalPlanner(self.loop,lambda *a,**k:json.dumps({'summary':'hint','quotes':[]}))
+        path=f'/api/projects/{self.project}/local-planning';body={'key':'analysis','goal':'Explain','path':'a.txt'}
+        self.assertEqual(self.client.post(path+'/analyze',headers={'Authorization':'Bearer reader'},json=body).status_code,403)
+        response=self.client.post(path+'/analyze',headers=self.headers,json=body)
+        self.assertEqual(response.status_code,200,response.text);task=response.json()
+        self.assertNotIn('_root',response.text);self.assertNotIn('_principal',response.text)
+        self.loop.worker.once();done=self.loop.ledger.get(self.project,task['id'])
+        self.assertEqual(done['status'],'completed');self.assertTrue(done['result']['read_only'])
+        self.assertEqual((self.root/'a.txt').read_bytes(),b'before');self.assertEqual(self.provider.calls,[])
+        self.assertEqual(self.client.post(path+'/accept',headers=self.headers,json={'task':task['id'],'version':done['version']}).status_code,409)
     def test_discovery_scoped_without_model_and_explicit_transition(self):
         path=f'/api/projects/{self.project}/local-planning'
         body={'key':'find','query':'before'}

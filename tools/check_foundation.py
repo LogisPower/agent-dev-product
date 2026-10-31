@@ -30,6 +30,8 @@ try:
     suite=unittest.TestSuite()
     for name in ('test_foundation','test_foundation_api','test_model_response','test_durable_dispatch','test_original_ui','test_project_lifecycle','test_project_export','test_activation_adapter','test_local_work_loop','test_local_work_api','test_local_work_plan','test_local_progress','test_local_planner','test_local_workflow','test_local_discovery','test_local_author','test_local_mixed_plan','test_project_verification','test_activation_entrypoint','test_local_provider_adapters'):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
+    for name in ('test_recursive_context','test_local_analysis'):
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
     result=unittest.TextTestRunner(verbosity=2).run(suite)
     report={'tests':result.testsRun,'passed':result.wasSuccessful(),'failures':len(result.failures),'errors':len(result.errors),'skipped':len(result.skipped),'test_directory':str(temporary),'live_data_modified':False,'providers':'synthetic, plus real mock HTTP disconnect test'}
     (root/'foundation-test-results.json').write_text(json.dumps(report,indent=2))

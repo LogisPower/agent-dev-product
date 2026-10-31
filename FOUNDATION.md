@@ -487,3 +487,10 @@ staged files unchanged. Cloud review added post-wait version/scope rechecks.
 `provider-adapter-test-results.json` records 33 passing focused checks; this is not
 a new full-suite or live deployment claim. `ACTIVATION-CHOICE.md` captures the exact
 scope/options, outstanding authentication inputs and recovered GitHub review setup.
+
+The recovered recursive context reducer now has a staged bounded read-only adapter,
+durable per-node progress, explicit safe resume, cancellation, exact-quote validation
+and an original Tasks UI flow into separately approved exact edits. Source hashes
+are checked again at dispatch; uncertain inference is never automatically replayed.
+See LOCAL-WORK.md for the three-call/32-KB limits and mixed-writer restriction.
+Live activation and semantic summary-grounding evaluation remain outstanding.

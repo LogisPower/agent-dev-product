@@ -1,5 +1,11 @@
 # Existing recursive setup: verified wiring and next integration
 
+**Staged update:** the recovered reducer is now present and connected through
+`local_analysis.py`, the scoped planning API and original Tasks UI. The inspection
+below describes the earlier local state; it is retained as historical evidence.
+The bounded implementation and remaining limits are documented in LOCAL-WORK.md.
+It has not been activated in the running service.
+
 Read-only inspection, 2026-10-31. No generation, cloning, GitHub writes, service
 activation or security changes were required for this check.
 

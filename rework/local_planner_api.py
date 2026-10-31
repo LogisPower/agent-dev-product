@@ -37,6 +37,18 @@ class AuthorRequest(BaseModel):
     context_paths:list[str]=Field(default_factory=list,max_length=2)
 
 
+class AnalysisRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    key:str=Field(min_length=1,max_length=170)
+    goal:str=Field(min_length=1,max_length=1000)
+    path:str=Field(min_length=1,max_length=180)
+
+
+class AnalysisPlan(Decision):
+    goal:str=Field(min_length=1,max_length=1000)
+    paths:list[str]=Field(min_length=1,max_length=2)
+
+
 class MixedRequest(BaseModel):
     model_config=ConfigDict(extra='forbid')
     key:str=Field(min_length=1,max_length=180)
@@ -52,6 +64,8 @@ class VerificationRequest(BaseModel):
 
 
 def register(app,loop,scope,check,guarded,public,admission):
+    from local_analysis import LocalAnalysis
+    analysis=getattr(loop,'analysis',None) or LocalAnalysis(loop)
     from local_discovery import LocalDiscovery
     discovery=getattr(loop,'discovery',None) or LocalDiscovery(loop)
     from local_author import LocalAuthor
@@ -64,6 +78,20 @@ def register(app,loop,scope,check,guarded,public,admission):
         value=getattr(loop,'planner',None)
         if value is None:raise ValueError('Local text-only planner is not configured')
         return value
+    @app.post('/api/projects/{project}/local-planning/analyze')
+    def analyze(project:str,body:AnalysisRequest,permissions=Depends(scope)):
+        def run():
+            check(project,permissions,True);identity=permissions.get('_dispatch_identity')
+            if not identity:raise PermissionError('Authenticated principal required')
+            return public(analysis.submit(project,body.key,body.goal,body.path,identity))
+        return guarded(run)
+    @app.post('/api/projects/{project}/local-planning/from-analysis')
+    def from_analysis(project:str,body:AnalysisPlan,permissions=Depends(scope)):
+        def run():
+            check(project,permissions,True);identity=permissions.get('_dispatch_identity')
+            if not identity:raise PermissionError('Authenticated principal required')
+            return public(analysis.plan(project,body.task,body.version,body.goal,body.paths,identity))
+        return guarded(run)
     @app.post('/api/projects/{project}/local-planning/propose')
     def propose(project:str,body:Request,permissions=Depends(scope)):
         def run():
@@ -126,7 +154,8 @@ def register(app,loop,scope,check,guarded,public,admission):
                 result['tasks']=[public(task) for task in result['tasks']];return result
             if action=='cancel':
                 task=loop.ledger.get(project,body.task)
-                if task['kind'] not in ('local_plan','local_discovery','local_author','local_verify'):raise ValueError('Not a planning task')
+                if task['kind'] not in ('local_plan','local_discovery','local_author','local_verify','local_analysis'):raise ValueError('Not a planning task')
                 return public(loop.ledger.cancel(project,body.task))
+            if action=='resume-analysis':return public(analysis.resume(project,body.task,body.version))
             raise ValueError('Unknown proposal action')
         return guarded(run)

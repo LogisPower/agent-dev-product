@@ -42,6 +42,7 @@ class MixedPlans:
         for selection in selections:
             if type(selection) is not dict or set(selection)!={'task','version'} or not isinstance(selection['task'],str) or not re.fullmatch('[a-f0-9]{32}',selection['task']) or type(selection['version']) is not int:raise ValueError('Current proposal IDs and versions required')
             task=self.loop.ledger.get(project,selection['task']);payload=task['payload']
+            if payload.get('_analysis_evidence') is not None:raise ValueError('Analysis-backed proposals require the local exact-edit approval workflow; mixed writer context checks are not connected')
             if task['id'] in sources or task['status']!='completed' or task['version']!=selection['version'] or task['kind'] not in ('local_plan','local_author'):raise ValueError('Distinct completed current proposals required')
             if not self.loop.authorize(task):raise PermissionError('Original proposal scope withdrawn')
             if str(files.root)!=payload['_root']:raise PermissionError('Proposal root changed')

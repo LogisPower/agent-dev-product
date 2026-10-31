@@ -8,7 +8,7 @@ def plan_identifier(project,key):
     return hashlib.sha256(encoded([project,key]).encode()).hexdigest()[:32]
 
 
-def submit_plan(loop,project,key,title,steps,principal):
+def submit_plan(loop,project,key,title,steps,principal,source_analysis=None):
     if not isinstance(key,str) or not 1<=len(key)<=180 or not isinstance(title,str) or not title.strip() or len(title)>120:
         raise ValueError('Bounded plan key and title required')
     if not isinstance(steps,list) or not 1<=len(steps)<=8:
@@ -29,13 +29,14 @@ def submit_plan(loop,project,key,title,steps,principal):
         if path.casefold() in paths:raise ValueError('Use one planned edit per file; combine changes before submission')
         names.add(name);paths.add(path.casefold());normalized.append({'name':name,'edit':edit,'after':after})
     # The whole immutable contract is included in every job's idempotency check.
-    contract=hashlib.sha256(encoded({'title':title,'steps':normalized,'principal':principal}).encode()).hexdigest()
+    contract=hashlib.sha256(encoded({'title':title,'steps':normalized,'principal':principal,**({'analysis':source_analysis} if source_analysis is not None else {})}).encode()).hexdigest()
     plan_id=plan_identifier(project,key)
     created={};tasks=[]
     with loop.ledger.transaction() as connection:
         for position,step in enumerate(normalized,1):
             dependencies=[{'task':created[n]['id'],'path':created[n]['payload']['targets'][0]['path']} for n in step['after']]
             metadata={'id':plan_id,'title':title,'name':step['name'],'position':position,'total':len(steps),'after':step['after'],'contract':contract}
+            if source_analysis is not None:metadata['_analysis_evidence']=source_analysis
             task=loop.submit(project,'plan:'+plan_id+':'+step['name'],[step['edit']],principal=principal,
                 dependencies=dependencies,_connection=connection,_plan=metadata)
             created[step['name']]=task;tasks.append(task)

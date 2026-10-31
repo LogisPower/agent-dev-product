@@ -518,3 +518,45 @@ replay, fresh checks, stale/concurrent files, bounds, missing runtime, timeout,
 cancellation, current scope, public metadata and mixed-plan regressions. The DOM
 fixture passed key preservation and fresh-check behavior. No live activation or
 model/GPU/security/service changes occurred.
+# Bounded recursive source analysis (staged)
+
+The existing GitHub `RecursiveContext` reducer is reused through `LocalAnalysis`.
+The original Tasks UI offers **Analyze larger source locally**, evidence/status,
+cancellation, **Resume saved analysis**, and **Plan selected files with this analysis**.
+The scoped endpoints are `local-planning/analyze`, `resume-analysis` and
+`from-analysis`. Submitting analysis requires the existing project write scope
+because it queues model work; the operation itself has no file-write capability.
+
+One explicit nonempty text file is limited to 32 KB. The reducer uses 16,000-character
+leaves, depth one and at most three serial provider calls (two leaves and synthesis).
+Each call has at most 90 seconds; each execution has a 300-second elapsed bound.
+Across explicit resumes, the same analysis retains a maximum of three reserved calls.
+The provider must honor the existing cancellation/timeout contract. This adds no
+worker, model, credentials or automatic retry and does not promise immediate replies.
+
+Each node is marked started before inference and saved completed only after strict
+JSON and quote checks. Results remain in the private task ledger, outside project
+files. Resume reuses completed nodes after revalidating the complete source hash.
+An uncertain started call is not replayed; its task remains reviewable and an explicit
+new analysis is required if the user chooses to spend a fresh budget. Cancellation
+between completed calls can resume without repeating them. Process recovery retains
+the existing needs-review boundary; it does not silently restart inference.
+
+Quotes must exactly match original character spans; synthesis may reuse only quotes
+from child results. Summaries remain unverified navigation hints, even when quotes
+match. Analysis does not execute source, tools, generated tests or edits.
+
+Planning still reads one or two selected edit files totaling at most 12 KB. It uses
+analysis as untrusted context and rechecks the analyzed source at submission, before
+and after planning, acceptance and immediately before local edit dispatch. Edit
+anchors and target hashes are independently checked; every edit needs approval.
+Analysis-backed proposals are explicitly rejected by the mixed Foundation writer
+until that separate execution path has equivalent context checks. Larger-file editing,
+deep recursion, multi-document analysis and semantic grounding evaluation remain open.
+
+Local Bonsai session `logis-analysis-bridge-ecfd52a` applied six exact planner edits.
+It stalled on one anchor; the owned session was canceled, its six edits independently
+verified, and the missing guard plus execution-time validation completed under cloud
+review. All other 229 staged files were unchanged before importing that local work.
+Focused synthetic analysis/API/planner checks and the Tasks DOM fixture validate the
+adapter. This is not a live recursive-inference or visual-browser acceptance claim.

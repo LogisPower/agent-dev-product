@@ -40,7 +40,7 @@ Not a complete installer. Machine-specific paths marked LOGIS_USER require confi
 Issue or capability gap -> feature branch -> tests -> draft PR -> review -> explicit release. No automatic merging or deployment.
 
 ## Recursive context
-rework/recursive_context.py is a bounded divide-and-summarize experiment, not the full research RLM environment or model retraining. Production model wiring, cancellation and source-grounding evaluation remain outstanding.
+rework/recursive_context.py is a bounded divide-and-summarize experiment, not the full research RLM environment or model retraining. The staged read-only adapter now adds cancellation, durable chunk progress and verified quote spans; semantic summary grounding and live activation remain outstanding. It uses at most three calls for one 32 KB file, then hands selected small files to separately approved exact-edit planning.
 
 [RECURSIVE-INTEGRATION.md](RECURSIVE-INTEGRATION.md) describes the inspected local
 installations separately from this public export, which retains the older reducer.

@@ -21,6 +21,8 @@ const context={window:{},crypto:require('node:crypto').webcrypto,
        return {id:'f'.repeat(32),kind:'local_plan',version:1,status:'completed',targets:[],planning:{goal:body.goal,paths:body.paths},result:{proposal:{title:'Proposed',steps:[]},executed:false}};
      }
      if(body.action==='verify'){if(!context.verificationFailed){context.verificationFailed=true;throw Error('Uncertain verification reply')}return {id:'5'.repeat(32),kind:'local_verify',version:1,status:'queued',targets:[],verification:{paths:body.paths}}};
+     if(body.action==='analyze'){if(!context.analysisFailed){context.analysisFailed=true;throw Error('Uncertain analysis reply')}return {id:'6'.repeat(32),kind:'local_analysis',version:3,status:'completed',targets:[],result:{read_only:true}}};
+     if(body.action==='from-analysis')return {id:'7'.repeat(32),kind:'local_plan',version:1,status:'queued',targets:[]};
      if(body.action==='mixed')return {id:'mixed-id',tasks:[{id:'writer',status:'approval'}],steps:[{validation:{status:'passed',semantic_tests_run:false}}]};
      if(body.action==='author'){if(!context.authorFailed){context.authorFailed=true;throw Error('Uncertain author reply')}return {id:'4'.repeat(32),kind:'local_author',version:3,status:'completed',targets:[],result:{proposal:{path:'new.py',content:'VALUE = 1'}}}};
      if(body.action==='accept-author')return {write:{id:'writer',status:'approval'},verify:{id:'verification',status:'queued'}};
@@ -86,5 +88,8 @@ const all=n=>[n,...n.children.flatMap(all)],button=label=>all(panel).find(n=>n.t
  input('Files for project verification').value='a.js\nb.ts';await button('Start current-file verification').onclick();await button('Start current-file verification').onclick();
  const checks=calls.filter(c=>c.body.action==='verify');assert.equal(checks.length,2);assert.equal(checks[0].body.key,checks[1].body.key);assert.equal(input('Files for project verification').value,'a.js\nb.ts');
  await button('Start current-file verification').onclick();assert.notEqual(calls.at(-1).body.key,checks[1].body.key);assert.equal(calls.filter(c=>c.body.action==='approve').length,1);
- console.log('PASS: local task and plan preview, preserved drafts/keys, named dependencies, removal, unchanged evidence panels and separate approvals. DOM fixture, not visual browser acceptance.');
+ input('Source for read-only analysis').value='large.txt';await button('Analyze larger source locally').onclick();await button('Analyze larger source locally').onclick();
+ const analyses=calls.filter(c=>c.body.action==='analyze');assert.equal(analyses.length,2);assert.equal(analyses[0].body.key,analyses[1].body.key);assert.equal(input('Source for read-only analysis').value,'large.txt');
+ await button('Plan selected files with this analysis').onclick();assert.equal(calls.at(-1).body.action,'from-analysis');assert.equal(calls.filter(c=>c.body.action==='approve').length,1);
+ console.log('PASS: local tasks, analysis/planning, preserved drafts/keys, dependencies and separate approvals. DOM fixture, not visual browser acceptance.');
 })().catch(e=>{console.error(e);process.exitCode=1});

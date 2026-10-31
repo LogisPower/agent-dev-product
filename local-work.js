@@ -11,12 +11,12 @@ window.mountLogisLocalWork = function(parent, project) {
   let snapshot=null, cursor=0, refreshing=false, preparing=false, submitting=false, signature='', tasks=new Map(), keys=new Map();
   const base='/api/local-work?project='+encodeURIComponent(project);
   const send=(action,body)=>api('/api/local-work',{project,action,...body});
-  const decide=async(action,task)=>{try{if(['local_plan','local_discovery','local_author','local_verify'].includes(task.kind))await api('/api/local-planning',{project,action,task:task.id,version:task.version});else await send(action,{task:task.id,version:task.version});await refresh()}catch(error){notice.textContent=error.message}};
+  const decide=async(action,task)=>{try{if(['local_plan','local_discovery','local_author','local_verify','local_analysis'].includes(task.kind))await api('/api/local-planning',{project,action,task:task.id,version:task.version});else await send(action,{task:task.id,version:task.version});await refresh()}catch(error){notice.textContent=error.message}};
   function render(){
     const next=JSON.stringify([...tasks.values()]);if(next===signature)return;signature=next;
     cards.replaceChildren();
     for(const task of tasks.values()){
-      const tile=card(task.kind==='local_verify'?'Project verification':task.kind==='local_author'?'New-file proposal':task.kind==='local_discovery'?'Project discovery':task.kind==='local_plan'?'Local plan proposal':task.targets.map(t=>t.path).join(', '),task.plan?task.plan.title+' | Step '+task.plan.position+' of '+task.plan.total:'Task '+task.id,task.status.replaceAll('_',' ').toUpperCase());
+      const tile=card(task.kind==='local_analysis'?'Read-only source analysis':task.kind==='local_verify'?'Project verification':task.kind==='local_author'?'New-file proposal':task.kind==='local_discovery'?'Project discovery':task.kind==='local_plan'?'Local plan proposal':task.targets.map(t=>t.path).join(', '),task.plan?task.plan.title+' | Step '+task.plan.position+' of '+task.plan.total:'Task '+task.id,task.status.replaceAll('_',' ').toUpperCase());
       const detail=el('details');detail.append(el('summary','','Exact edit and evidence'),el('pre','',JSON.stringify({plan:task.plan,targets:task.targets,dependencies:task.dependencies,checkpoint:task.checkpoint,result:task.result,artifacts:task.artifacts},null,2)));tile.append(detail);
       if(task.status==='approval')tile.append(action('Approve local edit',()=>decide('approve',task)));
       if(['approval','queued','waiting','running','cancel_requested'].includes(task.status))tile.append(action('Cancel local task',()=>decide('cancel',task)));
@@ -43,6 +43,13 @@ window.mountLogisLocalWork = function(parent, project) {
         tile.append(action('Plan selected discoveries',async()=>{
           if(!planningEnabled){notice.textContent='Local planner is not connected.';return}
           try{const value=await api('/api/local-planning',{project,action:'from-discovery',task:task.id,version:task.version,goal:goal.value,paths:selectedFiles.value.split(/\r?\n/).map(p=>p.trim()).filter(Boolean),allow_completed:newGoal.checked===true});tasks.set(value.id,value);render();await refresh()}catch(error){notice.textContent=error.message}
+        }));
+      }
+      if(task.kind==='local_analysis'){
+        tile.append(el('p','muted','Read-only analysis. Quotes are checked against source; summaries may be wrong. Planning rechecks the source and never approves edits.'));
+        if(['failed','canceled','needs_review'].includes(task.status))tile.append(action('Resume saved analysis',()=>decide('resume-analysis',task)));
+        if(task.status==='completed')tile.append(action('Plan selected files with this analysis',async()=>{
+          try{const value=await api('/api/local-planning',{project,action:'from-analysis',task:task.id,version:task.version,goal:goal.value,paths:selectedFiles.value.split(/\r?\n/).map(p=>p.trim()).filter(Boolean)});tasks.set(value.id,value);render();await refresh()}catch(error){notice.textContent=error.message}
         }));
       }
       if(task.kind==='local_plan'&&task.status==='completed'){
@@ -136,6 +143,18 @@ window.mountLogisLocalWork = function(parent, project) {
     catch(error){notice.textContent=error.message+' The goal and request identity are retained.'}
     finally{proposing=false;propose.disabled=!planningEnabled}
   });propose.disabled=true;
+  const analysisPath=el('input');analysisPath.setAttribute('aria-label','Source for read-only analysis');analysisPath.placeholder='One project-relative text file, at most 32 KB';
+  const analysisKeys=new Map();let analyzing=false;
+  const analyze=action('Analyze larger source locally',async()=>{
+    if(!planningEnabled||analyzing){notice.textContent='Connect the local planner before analysis.';return}
+    const draft={goal:goal.value,path:analysisPath.value};
+    if(!draft.goal.trim()||!draft.path.trim()){notice.textContent='Enter a question and source path.';return}
+    const fingerprint=JSON.stringify(draft);if(!analysisKeys.has(fingerprint))analysisKeys.set(fingerprint,crypto.randomUUID());analyzing=true;analyze.disabled=true;
+    try{const task=await api('/api/local-planning',{project,action:'analyze',key:analysisKeys.get(fingerprint),...draft});tasks.set(task.id,task);render();notice.textContent='Read-only analysis queued: at most three serial model calls. No files will be edited.';await refresh()}
+    catch(error){notice.textContent=error.message+' Analysis draft and request identity retained.'}
+    finally{analyzing=false;analyze.disabled=false}
+  });
+
   const newPath=el('input');newPath.placeholder='New project-relative filename in an existing directory';newPath.setAttribute('aria-label','New file path');
   const authorKeys=new Map();let authoring=false;
   const author=action('Draft a new file locally',async()=>{
@@ -174,6 +193,6 @@ window.mountLogisLocalWork = function(parent, project) {
     try{const value=await api(base+'&action=context&path='+encodeURIComponent(path.value));evidence.textContent=JSON.stringify(value,null,2);history.open=true}
     catch(error){notice.textContent=error.message}
   });
-  panel.append(el('h3','section-title','Discover project files'),query,directory,discover,el('p','muted','Read-only bounded snapshot: at most eight directories and 24 small files. Narrow the directory if incomplete.'),completedLabel,el('h3','section-title','Plan a change locally'),goal,selectedFiles,propose,newPath,author,el('p','muted','Planning reads selected files and proposes edits. It cannot approve or execute them. Requires a connected local planner. New files additionally require the approved Foundation writer, stay below 16 KB, and cannot overwrite existing files.'),path,load,preview,inspect,history,before,after,dependency,artifact,queue,add,el('h3','section-title','Draft local plan'),el('p','muted','Add up to eight files. Each step waits for the previous step’s verified artifact. Saving a plan does not approve it.'),planTitle,planList,savePlan,el('h3','section-title','Mixed create/edit plan'),el('p','muted','Add completed proposals from their cards in execution order. Python, JSON, JavaScript and TypeScript receive syntax checks only; generated code is never executed. File effects are sequential and individually approved, not an all-files atomic commit.'),mixedTitle,manualLabel,mixedDraft,saveMixed,inspectMixed,mixedEvidence,el('h3','section-title','Verify current project files'),el('p','muted','Checks selected versions only, at most eight files and 64 KB. No model, imports, package scripts or generated tests run. TypeScript type-checking and JSX/TSX are not supported.'),verifyPaths,verifyFiles,notice,status,action('Refresh local tasks',refresh),cards);parent.append(panel);refresh();
+  panel.append(el('h3','section-title','Discover project files'),query,directory,discover,el('p','muted','Read-only bounded snapshot: at most eight directories and 24 small files. Narrow the directory if incomplete.'),completedLabel,el('h3','section-title','Plan a change locally'),goal,selectedFiles,propose,analysisPath,analyze,el('p','muted','Larger-source analysis saves completed chunks. At most 32 KB, three calls and 90 seconds per call. Resume reuses saved results; uncertain calls require review. Selected edit files remain limited to 12 KB total.'),newPath,author,el('p','muted','Planning reads selected files and proposes edits. It cannot approve or execute them. Requires a connected local planner. New files additionally require the approved Foundation writer, stay below 16 KB, and cannot overwrite existing files.'),path,load,preview,inspect,history,before,after,dependency,artifact,queue,add,el('h3','section-title','Draft local plan'),el('p','muted','Add up to eight files. Each step waits for the previous step’s verified artifact. Saving a plan does not approve it.'),planTitle,planList,savePlan,el('h3','section-title','Mixed create/edit plan'),el('p','muted','Add completed proposals from their cards in execution order. Python, JSON, JavaScript and TypeScript receive syntax checks only; generated code is never executed. File effects are sequential and individually approved, not an all-files atomic commit.'),mixedTitle,manualLabel,mixedDraft,saveMixed,inspectMixed,mixedEvidence,el('h3','section-title','Verify current project files'),el('p','muted','Checks selected versions only, at most eight files and 64 KB. No model, imports, package scripts or generated tests run. TypeScript type-checking and JSX/TSX are not supported.'),verifyPaths,verifyFiles,notice,status,action('Refresh local tasks',refresh),cards);parent.append(panel);refresh();
   const timer=setInterval(()=>{if(!panel.isConnected){clearInterval(timer);return}refresh()},2000);
 };
