@@ -8,7 +8,9 @@ import psycopg
 client=TestClient(create_app(dsn,{'reader':{'projects':[first]}}));headers={'Authorization':'Bearer reader'}
 state=client.get('/api/state',params={'id':first},headers=headers)
 assert state.status_code==200,state.text
-assert state.json()['capabilities']['generation'] is False
+assert state.json()['capabilities']['generation'] is True
+assert state.json()['capabilities']['files'] is True
+assert state.json()['capabilities']['conversation_write'] is False
 canonical=client.get('/api/projects/'+first+'/messages',headers=headers).json()
 assert state.json()['history']==canonical
 assert client.get('/api/state',params={'id':second},headers=headers).status_code==404
