@@ -13,7 +13,7 @@ def db():
 def items(kind):
     if kind not in KINDS:raise ValueError('Unknown record type')
     with closing(db()) as c:
-        return [{**dict(zip(('id','kind','title','detail','status','created','updated'),row)),**source_links().get(row[0],{})} for row in c.execute('SELECT * FROM items WHERE kind=? ORDER BY updated DESC',(kind,)).fetchall()]
+        return [{**dict(zip(('id','kind','title','detail','status','created','updated'),row)),**source_links().get(row[0],{}),**({'task_revision_sha256':hashlib.sha256(json.dumps(row,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()).hexdigest()} if kind=='tasks' else {})} for row in c.execute('SELECT * FROM items WHERE kind=? ORDER BY updated DESC',(kind,)).fetchall()]
 def save(data):
     kind=data.get('kind');title=str(data.get('title','')).strip()[:180];detail=str(data.get('detail',''))[:12000]
     if kind not in KINDS or not title:raise ValueError('Provide a valid type and title')
@@ -26,11 +26,32 @@ def save(data):
         c.execute('INSERT OR REPLACE INTO items VALUES (?,?,?,?,?,?,?)',(identifier,kind,title,detail,status,prior[1] if prior else time.time(),time.time()))
     return {'id':identifier,'saved':True}
 def paperclip(path='/health'):
+    import urllib.error
     global PAPERCLIP_CACHE,PAPERCLIP_CHECKED
     if path=='/health' and PAPERCLIP_CACHE is not None and time.time()-PAPERCLIP_CHECKED<10:return PAPERCLIP_CACHE
+    def failed(code,reason):
+        # Never return exception text, URLs, headers or response bodies.
+        return {'online':False,'reason':reason,'diagnostic':code}
     try:
-        with urllib.request.urlopen('http://127.0.0.1:3100/api'+path,timeout=1) as r:result={'online':True,'data':json.load(r)}
-    except Exception as e:result={'online':False,'reason':'Installed. Windows blocked its database startup. Run Start Paperclip.ps1 from Windows to retry. Agent scheduling is not available yet.','diagnostic':'uv_os_get_passwd returned ENOMEM in the managed Windows session'}
+        with urllib.request.urlopen('http://127.0.0.1:3100/api'+path,timeout=1) as r:
+            data=json.load(r)
+        if path=='/health' and not isinstance(data,dict):
+            result=failed('invalid_response','Paperclip returned an invalid health response.')
+        else:result={'online':True,'data':data}
+    except urllib.error.HTTPError:
+        result=failed('http_error','Paperclip responded with an HTTP error. Its readiness is not confirmed.')
+    except TimeoutError:
+        result=failed('timeout','Paperclip did not respond within the one-second timeout.')
+    except urllib.error.URLError as error:
+        if isinstance(error.reason,TimeoutError):
+            result=failed('timeout','Paperclip did not respond within the one-second timeout.')
+        else:result=failed('unreachable','Paperclip could not be reached. It may be stopped or the connection may be unavailable.')
+    except (json.JSONDecodeError,UnicodeError):
+        result=failed('invalid_response','Paperclip returned an unreadable JSON response.')
+    except ConnectionError:
+        result=failed('unreachable','Paperclip could not be reached. It may be stopped or the connection may be unavailable.')
+    except Exception:
+        result=failed('request_failed','The Paperclip status request failed. Its readiness is unknown.')
     if path=='/health':PAPERCLIP_CACHE=result;PAPERCLIP_CHECKED=time.time()
     return result
 def summary(projects,jobs):

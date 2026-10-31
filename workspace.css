@@ -7,3 +7,11 @@ body{font-family:Inter,"Segoe UI",system-ui,sans-serif;font-size:13px;background
 .task-board{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:16px;overflow:auto;padding-bottom:18px}.task-column{background:var(--panel,#101923);border-radius:12px;padding:12px;min-height:300px}.task-column .atlas-card{padding:16px}.decision-table{width:100%;border-collapse:collapse;text-align:left}.decision-table th,.decision-table td{padding:16px;border-bottom:1px solid #304153;vertical-align:top}.decision-table th{color:#cdb488}.decision-table td{max-width:380px;overflow-wrap:anywhere}.case-dossier{padding:22px;border-left:3px solid #cdb488;background:#15202b;margin:12px 0}.case-dossier summary{cursor:pointer;font-size:16px}.case-dossier p{white-space:pre-wrap;line-height:1.8}.pipeline-flow{border-left:2px solid #72b9ba;padding-left:24px;margin:24px 0}.pipeline-step{padding:16px;background:#142630;border-radius:8px;margin:12px 0;white-space:pre-wrap}.routine-row{display:grid;grid-template-columns:26px 1fr auto;gap:16px;padding:22px;border-bottom:1px solid #304153}.routine-row p{grid-column:2/4;white-space:pre-wrap}.routine-row button{grid-column:2}@media(max-width:760px){.decision-table{display:block;overflow:auto}.task-board{grid-template-columns:repeat(4,250px)}}
 
 .account-form{max-width:700px;display:grid;grid-template-columns:1fr 1fr;gap:18px}.account-form label{display:flex;flex-direction:column;gap:8px;text-transform:capitalize}.account-form input,.account-form textarea{width:100%}.account-form p{grid-column:1/-1}@media(max-width:760px){.account-form{grid-template-columns:1fr}}
+
+/* Logis design slice: preserve existing navigation and functional handlers. */
+:root[data-theme="atlas"]{--bg:#101416;--rail:#111719;--panel:#181e21;--line:#354246;--ink:#e9eeeb;--muted:#a1b0b2;--accent:#9ce2cb;--accentdark:#142a23}
+:root[data-theme="atlas"] .sidebar{background:var(--rail)}
+:root[data-theme="atlas"] .composer,:root[data-theme="atlas"] .drawer{background:var(--panel)}
+:root[data-theme="atlas"] .nav-link.active{background:#223b32;color:var(--accent)}
+.canonical-files textarea{display:block;width:100%;max-width:100%;min-height:200px;box-sizing:border-box;margin:12px 0;font-family:monospace}
+.canonical-files .muted{overflow-wrap:anywhere}

@@ -1,0 +1,131 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Logis candidate</title><style>body{background:#101822;color:#d4e4ee;font:16px system-ui;padding:30px}button,input,select,textarea{padding:10px;margin:8px;background:#203140;color:inherit}article{padding:18px;border:1px solid #405366;margin:10px}small{color:#9cc7c8}dialog{background:#14202c;color:#d4e4ee;border:1px solid #405366;border-radius:12px;max-width:min(680px,90vw);max-height:85vh;overflow:auto}dialog::backdrop{background:#0009}dialog pre{white-space:pre-wrap;overflow-wrap:anywhere}blockquote{border-left:3px solid #70d5c5;padding-left:12px}</style><h1>Logis · Candidate workspace</h1><p>Isolated preview. Production is unchanged.</p><input id="token" type="password" aria-label="Access token"><button id="connect">Connect</button><select id="projects" aria-label="Project"></select><p id="status" role="status">Disconnected</p><button id="missions">Missions</button><button id="decisions">Decisions</button><button id="mindVault">Mind Vault</button><button id="activity">Activity</button><button id="newRecord">New task / decision</button><button id="analyze">Review conversation suggestions</button><section aria-label="New conversation message"><h2>Conversation</h2><p>This preview saves messages and suggests actions. Chat replies are not connected yet.</p><form id="messageForm"><textarea id="message" aria-label="New message" required maxlength="12000"></textarea><button id="sendMessage">Save message</button><p id="messageStatus" role="status"></p></form><p id="queueStatus" role="status"></p></section><details id="processingHistory"><summary>Message processing history</summary><div id="jobHistory"></div></details><section id="suggestions" aria-label="Conversation suggestions"></section><div id="records"></div><div id="events" hidden></div><dialog id="sourceDialog"><button id="closeSource">Close source</button><div id="sourceContent"></div></dialog><script>
+const $=id=>document.getElementById(id);let token='',project='',cursor=0,generation=0,busy=false,editing=false,recordKind='tasks',jobSignature='';const seen=new Set();
+async function api(path,options={}){let r=await fetch(path,{...options,headers:{Authorization:'Bearer '+token,...options.headers}});let data=await r.json();if(!r.ok)throw Error(data.detail||'Request failed: '+r.status);return data}
+let recordSignature='';
+const kindLabel=kind=>({tasks:'Task',task:'Task',decisions:'Decision',decision:'Decision',preferences:'Preference',goals:'Goal'})[kind]||'Record';
+async function records(g){
+ if(editing)return;const requestedKind=recordKind;const rows=await api('/api/projects/'+encodeURIComponent(project)+'/objects');
+ if(g!==generation||editing||requestedKind!==recordKind)return;
+ const signature=project+requestedKind+JSON.stringify(rows);if(signature===recordSignature)return;recordSignature=signature;
+ $('records').replaceChildren();
+ const selected=rows.filter(x=>recordKind==='memory'?['preferences','goals'].includes(x.kind):recordKind==='tasks'?['tasks','task'].includes(x.kind):['decisions','decision'].includes(x.kind));
+ if(recordKind==='memory'){
+  const intro=document.createElement('p');intro.textContent='Review what Logis may remember for this project. Drafts need your confirmation. To correct an entry, save a new draft and replace the old memory.';$('records').append(intro);
+ }
+ for(const group of (recordKind==='memory'?['preferences','goals']:[recordKind])){
+  const section=document.createElement('section'),history=document.createElement('details'),historyTitle=document.createElement('summary');historyTitle.textContent='Replaced memories';history.append(historyTitle);
+  if(recordKind==='memory'){const heading=document.createElement('h2');heading.textContent=group==='preferences'?'Preferences':'Goals';section.append(heading)}
+  for(const x of selected.filter(x=>recordKind!=='memory'||x.kind===group)){
+   const card=document.createElement('article'),title=document.createElement('h3'),state=document.createElement('p'),edit=document.createElement('button'),evidence=document.createElement('button');
+   title.textContent=x.payload.title||x.id;state.textContent=x.status+' · version '+x.version;
+   edit.textContent='Edit '+kindLabel(x.kind).toLowerCase();edit.onclick=()=>openEditor(card,x);
+   evidence.textContent='View evidence';evidence.onclick=()=>showEvidence(x.id);card.append(title,state);if(!x.replaced_by)card.append(edit);card.append(evidence);
+   if(x.replaced_by)state.textContent='Replaced by '+(rows.find(r=>r.id===x.replaced_by)?.payload.title||'a newer memory');
+   if(x.replaces){const previous=document.createElement('p');previous.textContent='Replaces: '+(rows.find(r=>r.id===x.replaces)?.payload.title||'an earlier memory');card.append(previous)}
+   if(recordKind==='memory'&&x.status==='draft'&&!x.replaced_by){
+    const confirm=document.createElement('button');confirm.textContent='Confirm memory';const key=crypto.randomUUID();
+    confirm.onclick=async()=>{confirm.disabled=true;try{
+     await api('/api/projects/'+encodeURIComponent(project)+'/objects/'+encodeURIComponent(x.id),{method:'PATCH',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({expected_version:x.version,title:x.payload.title,detail:x.payload.detail||'',status:'confirmed'})});
+     if(g===generation){await records(g);await poll()}
+    }catch(e){state.textContent=e.message;confirm.disabled=false}};card.append(confirm);
+    const candidates=selected.filter(r=>r.kind===x.kind&&r.status==='confirmed'&&!r.replaced_by&&r.id!==x.id);
+    if(candidates.length){
+     const label=document.createElement('p'),choice=document.createElement('select'),replace=document.createElement('button'),blank=document.createElement('option');
+     label.textContent='Does this correct an existing memory?';choice.setAttribute('aria-label','Memory to replace for '+x.payload.title);blank.value='';blank.textContent='Select memory to correct';choice.append(blank);
+     for(const candidate of candidates){const option=document.createElement('option');option.value=candidate.id;option.textContent=candidate.payload.title;choice.append(option)}
+     replace.textContent='Replace selected memory';replace.disabled=true;let key=crypto.randomUUID();
+     choice.onchange=()=>{key=crypto.randomUUID();replace.disabled=!choice.value};
+     replace.onclick=async()=>{const old=candidates.find(r=>r.id===choice.value);if(!old||g!==generation)return;choice.disabled=true;replace.disabled=true;try{
+      await api('/api/projects/'+encodeURIComponent(project)+'/memory/'+encodeURIComponent(old.id)+'/replace',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({replacement_id:x.id,expected_version:old.version,replacement_version:x.version})});
+      if(g===generation){await records(g);await poll()}
+     }catch(e){state.textContent=e.message;choice.disabled=false;replace.disabled=false}};card.append(label,choice,replace);
+    }
+   }
+   if(x.replaced_by)history.append(card);else section.append(card);
+  }
+  if(!selected.some(x=>(recordKind!=='memory'||x.kind===group)&&!x.replaced_by)){const empty=document.createElement('p');empty.textContent='No records in this view.';section.append(empty)}
+  if(history.children.length>1)section.append(history);
+  $('records').append(section);
+ }
+}
+function openEditor(card,item){if(editing)return;editing=true;$('projects').disabled=true;$('connect').disabled=true;let key=null;const g=generation,form=document.createElement('form'),title=document.createElement('input'),detail=document.createElement('textarea'),state=document.createElement('select'),save=document.createElement('button'),cancel=document.createElement('button'),error=document.createElement('p');title.value=item.payload.title||'';title.required=true;title.maxLength=180;title.setAttribute('aria-label',kindLabel(item.kind||(recordKind==='tasks'?'tasks':'decisions'))+' title');detail.value=item.payload.detail||'';detail.maxLength=12000;detail.setAttribute('aria-label',kindLabel(item.kind||(recordKind==='tasks'?'tasks':'decisions'))+' details');state.setAttribute('aria-label',kindLabel(item.kind||(recordKind==='tasks'?'tasks':'decisions'))+' status');for(const value of (['preferences','goals'].includes(item.kind)?['draft','confirmed','archived']:item.isNew?['draft','open']:['draft','open','in_progress','done','archived'])){let option=document.createElement('option');option.value=value;option.textContent=value;state.append(option)}state.value=item.status;save.type='submit';save.textContent=item.isNew?'Create record':'Save changes';cancel.type='button';cancel.textContent='Cancel edit';error.setAttribute('role','alert');function finish(){recordSignature='';editing=false;$('projects').disabled=false;$('connect').disabled=false}cancel.onclick=()=>{finish();records(g).catch(e=>error.textContent=e.message)};form.oninput=()=>key=null;form.onsubmit=async event=>{event.preventDefault();save.disabled=true;key=key||crypto.randomUUID();try{await api('/api/projects/'+encodeURIComponent(project)+'/objects'+(item.isNew?'':'/'+encodeURIComponent(item.id)),{method:item.isNew?'POST':'PATCH',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(item.isNew?{kind:recordKind,title:title.value,detail:detail.value,status:state.value}:{expected_version:item.version,title:title.value,detail:detail.value,status:state.value})});finish();await records(g);await poll()}catch(e){error.textContent=e.message}finally{save.disabled=false}};form.append(title,detail,state,save,cancel,error);card.append(form)}
+async function showEvidence(id){const g=generation;$('sourceContent').replaceChildren();$('sourceDialog').showModal();try{const links=await api('/api/objects/'+encodeURIComponent(id)+'/evidence');if(g!==generation)return;for(const link of links){const row=document.createElement('article');const quote=document.createElement('blockquote');quote.textContent=link.quote;const note=document.createElement('p');note.textContent=(link.active?'Active evidence':'Source needs review')+' - revision '+link.source_revision;const open=document.createElement('button');open.textContent='Open source';open.onclick=async()=>{try{const source=await api('/api/sources/'+encodeURIComponent(link.source_id));if(g!==generation)return;const pre=document.createElement('pre');pre.style.whiteSpace='pre-wrap';pre.textContent=source.payload.content||JSON.stringify(source.payload,null,2);row.append(pre);open.disabled=true}catch(e){note.textContent=e.message}};row.append(quote,note,open);$('sourceContent').append(row)}if(!links.length)$('sourceContent').textContent='No supporting source is linked to this record.'}catch(e){$('sourceContent').textContent=e.message}}
+$('newRecord').onclick=()=>{if(editing||!project||recordKind==='memory')return;$('records').hidden=false;$('events').hidden=true;const card=document.createElement('article');$('records').prepend(card);openEditor(card,{isNew:true,status:'draft',payload:{}})};
+
+function renderSuggestions(result,g,selectedProject){
+  $('suggestions').replaceChildren();const heading=document.createElement('p');
+  heading.textContent='Review suggestions from your messages · saving a draft does not execute actions';$('suggestions').append(heading);
+  for(const item of result.items){
+   const card=document.createElement('article'),title=document.createElement('h3'),quote=document.createElement('blockquote'),save=document.createElement('button'),note=document.createElement('p');
+   title.textContent=(kindLabel(item.kind)+': ')+item.title;quote.textContent=item.quote;save.textContent=item.saved?'Saved':'Save draft';save.disabled=!!item.saved;
+   save.onclick=async()=>{save.disabled=true;try{
+    await api('/api/projects/'+encodeURIComponent(selectedProject)+'/objects',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'extraction-'+item.suggestion_key},body:JSON.stringify({kind:item.kind,title:item.title,source_id:item.source_id,quote:item.quote,status:'draft'})});
+    if(g!==generation)return;note.textContent='Draft saved with source evidence';save.textContent='Saved';await records(g);await poll();
+   }catch(e){if(g===generation){note.textContent=e.message;save.disabled=false}}};
+   card.append(title,quote,save,note);$('suggestions').append(card);
+  }
+  if(!result.items.length)$('suggestions').append(document.createTextNode('No supported suggestions were found.'));
+}
+let messageKey=null;
+$('message').oninput=()=>messageKey=null;
+$('messageForm').onsubmit=async event=>{
+ event.preventDefault();if(!project||editing)return;
+ const g=generation,selectedProject=project,content=$('message').value;
+ messageKey=messageKey||crypto.randomUUID();$('sendMessage').disabled=true;$('message').disabled=true;
+ try{
+  await api('/api/projects/'+encodeURIComponent(selectedProject)+'/messages',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':messageKey},body:JSON.stringify({content})});
+  if(g!==generation)return;
+  $('message').value='';messageKey=null;$('messageStatus').textContent='Message saved. Understanding is queued automatically.';await refreshJobs(g);await poll();
+ }catch(e){if(g===generation)$('messageStatus').textContent=e.message}
+ finally{$('sendMessage').disabled=false;$('message').disabled=false}
+};
+function renderJobHistory(jobs,g,selectedProject){
+ $('jobHistory').replaceChildren();
+ if(!jobs.length){$('jobHistory').textContent='No new messages have been processed in this project.';return}
+ for(const job of jobs){
+  const card=document.createElement('article'),heading=document.createElement('h3'),message=document.createElement('p'),note=document.createElement('p');
+  heading.textContent=({pending:'Waiting to process',running:'Processing',completed:'Ready for review',failed:'Needs attention'})[job.status];
+  message.textContent=job.message_preview;note.textContent='Attempts: '+job.attempts+' of 3'+(job.status==='completed'?' · '+(job.result?.items.length||0)+' suggestions':'');
+  card.append(heading,message,note);
+  if(job.status==='failed'){
+   const reason=document.createElement('p'),retry=document.createElement('button');
+   reason.textContent=({TimeoutError:'The local model timed out.',URLError:'The local model could not be reached.',ConnectionRefusedError:'The local model could not be reached.',JSONDecodeError:'The model response could not be understood.',ModelResponseInvalid:'The model returned an incomplete or invalid answer. No suggestions were saved from it.',ModelOutputTruncated:'The model ran out of output space. No partial memories were saved. Retry after checking the model settings.',LeaseExpired:'Processing was interrupted.'})[job.last_error]||'Processing could not finish.';
+   retry.textContent='Retry processing';const key=crypto.randomUUID();
+   retry.onclick=async()=>{retry.disabled=true;try{
+    await api('/api/projects/'+encodeURIComponent(selectedProject)+'/understanding/jobs/'+encodeURIComponent(job.id)+'/retry',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify({expected_version:job.version})});
+    if(g===generation){jobSignature='';await refreshJobs(g)}
+   }catch(e){if(g===generation){reason.textContent=e.message;retry.disabled=false}}};
+   card.append(reason,retry);
+  }
+  $('jobHistory').append(card);
+ }
+}
+async function refreshJobs(g){
+ const selectedProject=project;const jobs=await api('/api/projects/'+encodeURIComponent(selectedProject)+'/understanding/jobs');
+ if(g!==generation)return;
+ const signature=JSON.stringify(jobs);if(signature===jobSignature)return;jobSignature=signature;
+ const pending=jobs.filter(x=>['pending','running'].includes(x.status)).length,failed=jobs.filter(x=>x.status==='failed').length;
+ renderJobHistory(jobs,g,selectedProject);
+ $('queueStatus').textContent=jobs.length?'Understanding: '+pending+' pending or running · '+failed+' failed · '+jobs.filter(x=>x.status==='completed').length+' completed':'';
+ const items=[],keys=new Set();let analyzed=0;
+ for(const job of jobs){if(!job.result)continue;analyzed+=job.result.messages_analyzed;for(const item of job.result.items){if(!keys.has(item.suggestion_key)){keys.add(item.suggestion_key);items.push(item)}}}
+ if(jobs.some(x=>x.result))renderSuggestions({items,messages_analyzed:analyzed},g,selectedProject);
+}
+$('analyze').onclick=async()=>{
+ if(!project||editing)return;
+ const g=generation,selectedProject=project;$('analyze').disabled=true;
+ $('suggestions').textContent='Reading recent user messages with the local model…';
+ try{
+  const result=await api('/api/projects/'+encodeURIComponent(selectedProject)+'/understanding',{method:'POST'});
+  if(g!==generation)return;
+  renderSuggestions(result,g,selectedProject);
+ }catch(e){if(g===generation)$('suggestions').textContent=e.message}
+ finally{$('analyze').disabled=false}
+};
+$('closeSource').onclick=()=>$('sourceDialog').close();
+async function poll(){if(!token||!project||busy)return;busy=true;let g=generation;try{let page=await api('/api/events?project='+encodeURIComponent(project)+'&after='+cursor);if(g!==generation)return;for(let x of page.events){if(seen.has(x.event_id))continue;let row=document.createElement('article');row.textContent=x.event_type+' · '+x.object_id+' · version '+x.record_version;$('events').prepend(row);seen.add(x.event_id)}if(page.events.length||recordKind==='memory')await records(g);await refreshJobs(g);if(g===generation){cursor=page.next_cursor;$('status').textContent='Connected · cursor '+cursor}}catch(e){if(g===generation)$('status').textContent=e.message}finally{busy=false}}
+async function choose(){if($('sourceDialog').open)$('sourceDialog').close();generation++;recordSignature='';jobSignature='';messageKey=null;$('message').value='';$('messageStatus').textContent='';$('queueStatus').textContent='';$('jobHistory').replaceChildren();$('suggestions').replaceChildren();project=$('projects').value;cursor=0;seen.clear();$('events').replaceChildren();$('records').replaceChildren();try{await records(generation);await poll()}catch(e){$('status').textContent=e.message}}
+$('connect').onclick=async()=>{if($('sourceDialog').open)$('sourceDialog').close();generation++;recordSignature='';jobSignature='';messageKey=null;$('message').value='';$('messageStatus').textContent='';$('queueStatus').textContent='';$('jobHistory').replaceChildren();$('suggestions').replaceChildren();token=$('token').value.trim();project='';$('records').replaceChildren();$('events').replaceChildren();$('projects').replaceChildren();try{let rows=await api('/api/projects');for(let x of rows){let o=document.createElement('option');o.value=x.id;o.textContent=x.name;$('projects').append(o)}if(rows.length)await choose();else $('status').textContent='No permitted projects'}catch(e){$('status').textContent=e.message}};
+$('mindVault').onclick=()=>{if(editing)return;recordKind='memory';$('records').hidden=false;$('events').hidden=true;$('newRecord').disabled=true;records(generation).catch(e=>$('status').textContent=e.message)};
+$('projects').onchange=choose;$('decisions').onclick=()=>{if(editing)return;recordKind='decisions';$('newRecord').disabled=false;$('records').hidden=false;$('events').hidden=true;records(generation).catch(e=>$('status').textContent=e.message)};$('missions').onclick=()=>{if(editing)return;recordKind='tasks';$('newRecord').disabled=false;records(generation).catch(e=>$('status').textContent=e.message);$('records').hidden=false;$('events').hidden=true};$('activity').onclick=()=>{$('records').hidden=true;$('events').hidden=false};setInterval(poll,2000);
+</script></html>
