@@ -90,6 +90,7 @@ const all=n=>[n,...n.children.flatMap(all)],button=label=>all(panel).find(n=>n.t
  await button('Start current-file verification').onclick();assert.notEqual(calls.at(-1).body.key,checks[1].body.key);assert.equal(calls.filter(c=>c.body.action==='approve').length,1);
  input('Source for read-only analysis').value='large.txt';await button('Analyze larger source locally').onclick();await button('Analyze larger source locally').onclick();
  const analyses=calls.filter(c=>c.body.action==='analyze');assert.equal(analyses.length,2);assert.equal(analyses[0].body.key,analyses[1].body.key);assert.equal(input('Source for read-only analysis').value,'large.txt');
+ await button('Start a fresh analysis').onclick();const fresh=calls.filter(c=>c.body.action==='analyze').at(-1);assert.notEqual(fresh.body.key,analyses[1].body.key);assert.equal(input('Source for read-only analysis').value,'large.txt');
  await button('Plan selected files with this analysis').onclick();assert.equal(calls.at(-1).body.action,'from-analysis');assert.equal(calls.filter(c=>c.body.action==='approve').length,1);
  console.log('PASS: local tasks, analysis/planning, preserved drafts/keys, dependencies and separate approvals. DOM fixture, not visual browser acceptance.');
 })().catch(e=>{console.error(e);process.exitCode=1});

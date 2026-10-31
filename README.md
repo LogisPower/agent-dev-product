@@ -60,3 +60,7 @@ python rework/test_recursive_context.py
 node --check app.js
 
 node --check workspace.js
+
+
+A real local three-call analysis on synthetic source has now completed without
+source writes; see [RECURSIVE-DEMO.md](RECURSIVE-DEMO.md) for exact evidence and limits.

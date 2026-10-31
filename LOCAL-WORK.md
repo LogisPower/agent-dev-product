@@ -559,4 +559,9 @@ It stalled on one anchor; the owned session was canceled, its six edits independ
 verified, and the missing guard plus execution-time validation completed under cloud
 review. All other 229 staged files were unchanged before importing that local work.
 Focused synthetic analysis/API/planner checks and the Tasks DOM fixture validate the
-adapter. This is not a live recursive-inference or visual-browser acceptance claim.
+adapter. Those synthetic checks are not visual-browser acceptance.
+
+A subsequent real local three-call demonstration completed on synthetic source;
+see RECURSIVE-DEMO.md for timings, unchanged-source evidence and limits. The original
+Tasks UI now offers **Start a fresh analysis** to explicitly spend a new call budget;
+ordinary submission retains its existing identity to prevent accidental duplication.

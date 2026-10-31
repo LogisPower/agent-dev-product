@@ -44,3 +44,11 @@ remaining guards completed in review. Live recursive inference was not exercised
 CI profile-path configuration and the stale compatibility assertion were fixed
 on this PR; both hosted workflows passed at commit `a27367f`. The subsequent
 recursive integration has its own hosted CI run, not covered by that earlier result.
+
+
+At staged checkpoint `7de5e74`, real recursive inference completed on 17,980 bytes
+of synthetic text using the existing local provider: three calls, about 52 seconds,
+all nodes saved and source hash unchanged. See RECURSIVE-DEMO.md. The prompt used
+empty quotes; this is not a semantic-grounding or quote-accuracy evaluation. The
+UI's explicit fresh-analysis control passed its focused DOM fixture. Both hosted
+workflows passed at `acffd3a` before this UI/evidence follow-up.
