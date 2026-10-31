@@ -1,3 +1,4 @@
+import retrieval_status
 """The actual model/tool loop, executed as a persisted LangGraph."""
 import json,sqlite3
 from typing import TypedDict
@@ -49,12 +50,19 @@ def run(folder,job,messages,tools,request_model,call_tool,event,token_count,budg
             if isinstance(value,dict) and value.get('approval_required'):waiting=True
             calls+=1;text=json.dumps(value,ensure_ascii=False)
             history.append({'role':'tool','tool_call_id':call['id'],'content':text[:40000]})
+            if isinstance(value,dict) and value.get('task_binding_error'):
+                event(job,value['error'])
+                return {**s,'messages':history,'calls':calls,'pending':[],'done':True,'waiting':False,'answer':value['error']}
+            retrieval_notice=retrieval_status.tool_notice(name,value)
+            if retrieval_notice:
+                job['retrieval_status']='unavailable';event(job,retrieval_notice)
+                return {**s,'messages':history,'calls':calls,'pending':[],'done':True,'waiting':False,'answer':retrieval_notice}
             if isinstance(value,dict) and value.get('written'):event(job,'Saved '+value['written'])
         return {**s,'messages':history,'calls':calls,'pending':[],'waiting':waiting,'answer':'Your command is ready for review in Inbox. It has not run. Approve it, then press Continue so I can inspect the result.' if waiting else s['answer']}
     graph=StateGraph(RunState);graph.add_node('model',generate);graph.add_node('tools',execute)
     graph.add_edge(START,'model')
     graph.add_conditional_edges('model',lambda s:END if s['done'] or s['steps']>=9 else 'tools')
-    graph.add_conditional_edges('tools',lambda s:END if s.get('waiting') else 'model')
+    graph.add_conditional_edges('tools',lambda s:END if s.get('waiting') or s.get('done') else 'model')
     with SqliteSaver.from_conn_string(str(folder/'langgraph.sqlite')) as saver:
         compiled=graph.compile(checkpointer=saver)
         config={'configurable':{'thread_id':job['id']},'recursion_limit':24}

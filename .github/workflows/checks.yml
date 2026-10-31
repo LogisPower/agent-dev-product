@@ -15,6 +15,8 @@ jobs:
           node-version: '24'
       - run: python -m compileall -q .
       - run: node --check app.js && node --check workspace.js
+      - run: node --check local-work.js && node --check canonical-views.js && node --check durable-runs.js
+      - run: node test_local_work_ui.cjs && node test_durable_ui.cjs && node test_file_workflow_ui.cjs && node test_inbox_ui.cjs
       - run: python rework/test_records.py
       - run: python rework/test_recursive_context.py
       - run: python rework/test_model_response.py
@@ -38,6 +40,7 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      PYTHONPATH: .:rework:rework/deps
       LOGIS_TEST_DSN: host=127.0.0.1 port=5432 user=logis_restore password=ci-disposable-only dbname=postgres connect_timeout=5
     steps:
       - uses: actions/checkout@v4

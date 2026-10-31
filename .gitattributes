@@ -1,0 +1,2 @@
+# These files are byte-pinned by harness_context.py and manifest.json.
+rework/harness-context-v1/** -text

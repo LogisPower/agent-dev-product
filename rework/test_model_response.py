@@ -23,7 +23,7 @@ class ModelResponseTests(unittest.TestCase):
     def invoke(self, payload):
         with patch.object(extraction.urllib.request, 'urlopen') as open_url:
             open_url.return_value.__enter__.return_value.read.return_value = payload
-            return extraction.local_model([{'role': 'user', 'content': 'Synthetic input'}])
+            return extraction._local_model([{'role': 'user', 'content': 'Synthetic input'}])
 
     def test_answer_is_separate_from_reasoning(self):
         payload = {'choices': [{'finish_reason': 'stop', 'message': {
@@ -49,7 +49,7 @@ class ModelResponseTests(unittest.TestCase):
     def test_unavailable_model_is_not_a_successful_empty_extraction(self):
         with patch.object(extraction.urllib.request, 'urlopen', side_effect=ConnectionRefusedError):
             with self.assertRaises(ConnectionRefusedError):
-                extraction.local_model([])
+                extraction._local_model([])
 
     def test_invalid_sources_never_become_memories(self):
         source = {'role': 'user', 'source_id': 'synthetic', 'content': 'I prefer detailed answers.'}

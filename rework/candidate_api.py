@@ -2,8 +2,8 @@
 import sys,os,json,hmac,hashlib,uuid,threading,time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).parent/'deps'))
-from fastapi import FastAPI,Depends,Header,HTTPException,Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI,Depends,Header,HTTPException,Query,Request
+from fastapi.responses import HTMLResponse,FileResponse
 from pydantic import BaseModel,Field,ConfigDict
 from psycopg.types.json import Jsonb
 import psycopg
@@ -26,10 +26,10 @@ class MessageCreate(BaseModel):
 
 class RecordCreate(BaseModel):
     model_config=ConfigDict(extra="forbid")
-    kind:str=Field(pattern="^(tasks|decisions|preferences|goals)$")
+    kind:str=Field(pattern="^(tasks|decisions|preferences|goals|cases|conference|routines|pipelines|skills|agents|org)$")
     title:str=Field(min_length=1,max_length=180)
     detail:str=Field(default="",max_length=12000)
-    status:str=Field(default="draft",pattern="^(draft|open)$")
+    status:str=Field(default="draft",pattern="^(draft|open|in_progress|done|archived)$")
     source_id:str|None=Field(default=None,max_length=200)
     quote:str|None=Field(default=None,min_length=5,max_length=4000)
 
@@ -40,7 +40,7 @@ class RecordUpdate(BaseModel):
     title:str=Field(min_length=1,max_length=180)
     detail:str=Field(default="",max_length=12000)
 
-def create_app(dsn,credentials,run_worker=False,request_model=None):
+def create_app(dsn,credentials,run_worker=False,request_model=None,request_chat=None,request_build=None,request_hindsight=None,device_store=None,background_chat=False,enable_research=False,request_research=None,document_loader=None,document_embed=None,document_answerer=None,scope_refresh=None,foundation=None,context_counter=None,original_ui=False,foundation_background=True,local_work=None):
     if not credentials:raise ValueError('Configure scoped credentials')
     worker_state={'status':'disabled','processed':0}
     extraction_slot=threading.BoundedSemaphore(1)
@@ -70,8 +70,13 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
                     except Exception:
                         understanding_state['status']='retrying';stop.wait(2)
             understanding_thread=threading.Thread(target=supervise_understanding,daemon=True,name='logis-candidate-understanding');understanding_thread.start()
+        if background_chat:app.state.durable_dispatch.start()
+        if foundation is not None and foundation_background:foundation.start()
         try:yield
         finally:
+            if background_chat:app.state.durable_dispatch.close()
+            if foundation is not None:foundation.close()
+            if local_work is not None:local_work.close()
             stop.set()
             if thread:thread.join(timeout=8)
             if understanding_thread:understanding_thread.join(timeout=2)
@@ -79,38 +84,101 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             worker_state['status']='stopped' if not thread or not thread.is_alive() else 'stopping'
     app=FastAPI(title='Logis candidate API',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.worker_status=worker_state
-    def scope(authorization:str=Header(default='')):
+    app.state.context_counter=context_counter
+    session_scope=None
+    if device_store is not None:
+        from device_sessions import register
+        session_scope=register(app,credentials,device_store)
+    def scope(request:Request,authorization:str=Header(default='')):
+        if not authorization.startswith('Bearer ') and session_scope is not None:
+            granted=session_scope(request)
+            from system_summary import bind_scope
+            return bind_scope(scope_refresh(granted) if scope_refresh else granted,lambda:session_scope(request))
         if not authorization.startswith('Bearer '):raise HTTPException(401,'Authentication required')
         token=authorization.removeprefix('Bearer ')
         matched=next((value for key,value in credentials.items() if hmac.compare_digest(key,token)),None)
         if matched is None:raise HTTPException(401,'Authentication required')
-        return matched
+        from system_summary import bind_scope
+        def current_bearer():
+            return next((value for key,value in credentials.items() if hmac.compare_digest(key,token)),{})
+        granted=bind_scope(scope_refresh(matched) if scope_refresh else matched,current_bearer)
+        granted['_dispatch_identity']={'kind':'credential','id':hashlib.sha256(token.encode()).hexdigest()}
+        return granted
     @contextmanager
-    def db(readonly=True):
-        with psycopg.connect(dsn,row_factory=dict_row,options='-c default_transaction_read_only='+('on' if readonly else 'off')) as connection:
+    def db(readonly=True,snapshot=False):
+        with psycopg.connect(dsn,connect_timeout=15,row_factory=dict_row,options='-c default_transaction_read_only='+('on' if readonly else 'off')) as connection:
+            if snapshot:connection.isolation_level=psycopg.IsolationLevel.REPEATABLE_READ
             directory=connection.execute('SHOW data_directory').fetchone()['data_directory']
             if '/rework/postgres-restore-' not in directory.replace('\\','/').lower():raise RuntimeError('Candidate API refuses non-isolated database')
             yield connection
     def allowed(project,permissions):
         if project not in permissions.get('projects',[]):raise HTTPException(404,'Project not found')
+    def resolve_dispatch(identity):
+        def current():
+            if identity.get('kind')=='credential':
+                return next((v for k,v in credentials.items() if hashlib.sha256(k.encode()).hexdigest()==identity.get('id')), {})
+            if identity.get('kind')=='device' and hasattr(app.state,'resolve_dispatch_device'):
+                return app.state.resolve_dispatch_device(identity['id'])
+            return {}
+        from system_summary import bind_scope
+        granted=current()
+        result=bind_scope(scope_refresh(granted) if scope_refresh else granted,current)
+        result['_dispatch_identity']=identity
+        return result
+    from durable_dispatch import Dispatcher
+    app.state.durable_dispatch=Dispatcher(db,resolve_dispatch)
+    app.state.durable_background=background_chat
+    if local_work is not None:
+        from local_work_api import register as register_local_work
+        register_local_work(app,local_work,scope,allowed,resolve_dispatch,db)
+    if foundation is not None:
+        existing_authorize=foundation.worker.authorize
+        def authorize_file_task(task):
+            identity=task['payload'].get('_principal')
+            if not identity:return False
+            current=resolve_dispatch(identity)
+            return bool(current.get('write') and task['project'] in current.get('projects',[]) and existing_authorize(task))
+        foundation.worker.authorize=authorize_file_task
+        # File effects and project availability changes share the same DB lock.
+        # Holding it across the bounded handler closes the archive/write race.
+        def guard_file_handler(handler):
+            def guarded(attempt,files,payload):
+                project=attempt.task['project']
+                with db(False) as c:
+                    c.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(project,))
+                    row=c.execute('SELECT archived FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone()
+                    if not row or row['archived'] or not authorize_file_task(attempt.task):
+                        raise PermissionError('Project unavailable or scope revoked')
+                    return handler(attempt,files,payload)
+            return guarded
+        foundation.worker.handlers={kind:guard_file_handler(handler) for kind,handler in foundation.worker.handlers.items()}
+    @app.get('/api/projects/{project}/dispatch')
+    def dispatch_status(project:str,permissions=Depends(scope)):
+        allowed(project,permissions)
+        with db() as c:
+            rows=c.execute("SELECT id,agent_id,status,payload FROM logis_candidate.runs WHERE project_id=%s AND agent_id IN ('local-chat','local-build') ORDER BY COALESCE(payload->>'created_at',payload->>'accepted_at','') DESC,id DESC LIMIT 100",(project,)).fetchall()
+        return {'worker':app.state.durable_dispatch.status,'error_type':app.state.durable_dispatch.error_type,'single_model_slot':True,'runs':[{'id':r['id'],'kind':r['agent_id'],'status':r['status'],'phase':r['payload'].get('harness_phase'),'attempts':r['payload'].get('_dispatch',{}).get('attempts',0),'cancel_requested':r['payload'].get('cancel_requested',False),'notice':r['payload'].get('notice'),'checkpoint':r['payload'].get('context_checkpoint'),'sha256':r['payload'].get('sha256'),'checks':r['payload'].get('checks'),'preview_url':r['payload'].get('preview_url')} for r in rows]}
     @app.get('/preview',response_class=HTMLResponse)
     def preview():return (Path(__file__).parent/'candidate-preview.html').read_text(encoding='utf-8')
+    @app.get('/preview/assets/dreamspace.png',include_in_schema=False)
+    def dreamspace_wallpaper():
+        return FileResponse(Path(__file__).parent/'dreamspace-wallpaper.png',media_type='image/png',headers={'Cache-Control':'public, max-age=3600','X-Content-Type-Options':'nosniff'})
     @app.get('/health')
-    def health():return {'service':'logis-candidate','mode':'scoped','worker':dict(worker_state),'understanding_worker':dict(understanding_state)}
+    def health():return {'service':'logis-candidate','mode':'scoped','chat_worker':getattr(app.state,'chat_worker',{'status':'unavailable'}),'worker':dict(worker_state),'understanding_worker':dict(understanding_state)}
     @app.get('/api/projects')
     def projects(q:str=Query(default='',max_length=200),permissions=Depends(scope)):
         with db() as connection:
             rows=connection.execute('SELECT id,name,archived,legacy_payload FROM logis_candidate.projects WHERE id=ANY(%s) ORDER BY name',(permissions.get('projects',[]),)).fetchall()
-            return [{'id':x['id'],'name':x['name'],'archived':x['archived'],'kind':x['legacy_payload'].get('kind','project'),'updated':x['legacy_payload'].get('updated'),'running':False,'preview':''} for x in rows if q.casefold() in x['name'].casefold()]
+            return [{'id':x['id'],'name':x['name'],'archived':x['archived'],'trashed':bool(x['legacy_payload'].get('_ui_trashed')),'version':x['legacy_payload'].get('_ui_version',1),'kind':x['legacy_payload'].get('kind','project'),'updated':x['legacy_payload'].get('updated'),'running':False,'preview':''} for x in rows if q.casefold() in x['name'].casefold()]
     @app.get('/api/state')
     def legacy_state(id:str,permissions=Depends(scope)):
         allowed(id,permissions)
         with db() as connection:
             project=connection.execute('SELECT * FROM logis_candidate.projects WHERE id=%s',(id,)).fetchone()
             if not project:raise HTTPException(404,'Project not found')
-            rows=connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(id,)).fetchall()
+            rows=connection.execute('SELECT m.id,m.source_id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(id,)).fetchall()
             legacy=project['legacy_payload']
-            return {'id':id,'name':project['name'],'kind':legacy.get('kind','project'),'brief':legacy.get('brief',''),'history':rows,'checkpoint':{},'context_policy':project['context_policy'],'job':None,'capabilities':{'conversation_read':True,'conversation_write':bool(permissions.get('write')),'generation':False,'files':False},'migration_notice':'Imported conversation snapshot; live generation and file services are not connected.'}
+            return {'id':id,'name':project['name'],'kind':legacy.get('kind','project'),'brief':legacy.get('brief',''),'history':rows,'checkpoint':{},'context_policy':project['context_policy'],'job':None,'capabilities':{'conversation_read':True,'conversation_write':bool(permissions.get('write')),'generation':True,'files':True},'migration_notice':'Imported history preserved; local chat, bounded offline builds and imported text revisions are available.'}
     @app.get('/api/workspace')
     def legacy_workspace(view:str,permissions=Depends(scope)):
         supported={'tasks','decisions','cases','routines','pipelines','agents','skills','org','conference'}
@@ -122,7 +190,7 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
     @app.get('/api/projects/{identifier}/messages')
     def messages(identifier:str,permissions=Depends(scope)):
         allowed(identifier,permissions)
-        with db() as connection:return connection.execute('SELECT m.id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(identifier,)).fetchall()
+        with db() as connection:return connection.execute('SELECT m.id,m.source_id,m.role,m.content,m.legacy_index FROM logis_candidate.messages m JOIN logis_candidate.sources s ON s.id=m.source_id WHERE m.project_id=%s AND s.deleted_at IS NULL ORDER BY m.legacy_index',(identifier,)).fetchall()
     @app.post('/api/projects/{project}/messages')
     def append_message(project:str,body:MessageCreate,idempotency_key:str=Header(min_length=8,max_length=200),permissions=Depends(scope)):
         allowed(project,permissions)
@@ -261,7 +329,9 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             if prior:
                 if prior['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used')
                 return {'id':prior['object_id'],'event_id':prior['event_id'],'version':1,'replayed':True}
-            if not connection.execute('SELECT id FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone():raise HTTPException(404,'Project not found')
+            project_state=connection.execute('SELECT archived FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone()
+            if not project_state:raise HTTPException(404,'Project not found')
+            if project_state['archived']:raise HTTPException(409,'Archived project is read-only')
             source=None
             if body.source_id:
                 source=connection.execute('SELECT revision,payload FROM logis_candidate.sources WHERE id=%s AND project_id=%s AND deleted_at IS NULL',(body.source_id,project)).fetchone()
@@ -286,6 +356,8 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             if receipt:
                 if receipt['payload'].get('request_hash')!=fingerprint:raise HTTPException(409,'Idempotency key already used for another request')
                 return {'event_id':receipt['event_id'],'version':receipt['payload']['version'],'replayed':True}
+            project_state=connection.execute('SELECT archived FROM logis_candidate.projects WHERE id=%s',(project,)).fetchone()
+            if not project_state or project_state['archived']:raise HTTPException(409,'Project unavailable or archived')
             old=connection.execute('SELECT version,payload,kind FROM logis_candidate.objects WHERE id=%s AND project_id=%s FOR UPDATE',(identifier,project)).fetchone()
             if not old:raise HTTPException(404,'Object not found')
             if old['kind'] in ('preferences','goals'):
@@ -311,4 +383,28 @@ def create_app(dsn,credentials,run_worker=False,request_model=None):
             rows=connection.execute('SELECT sequence,event_id,project_id,object_id,event_type,record_version,created_at FROM logis_candidate.activity_projection WHERE project_id=ANY(%s) AND sequence>%s ORDER BY sequence LIMIT %s',(scopes,after,limit+1)).fetchall()
         more=len(rows)>limit;rows=rows[:limit]
         return {'events':rows,'next_cursor':rows[-1]['sequence'] if rows else after,'has_more':more}
+    if enable_research:
+        from candidate_research import register_research
+        import os
+        register_research(app,db,scope,allowed,Path(os.environ['LOCALAPPDATA'])/'LogisRework/research',request_research,document_loader,document_embed,document_answerer)
+    from candidate_chat import register_chat
+    register_chat(app,db,scope,allowed,request_chat,background_chat)
+    from candidate_build import register_build
+    register_build(app,db,scope,allowed,request_build)
+    from candidate_memory import register_memory
+    register_memory(app,db,scope,allowed)
+    from candidate_files import register_files
+    register_files(app,db,scope,allowed)
+    from candidate_hindsight import register_hindsight,provider
+    register_hindsight(app,db,scope,allowed,request_hindsight or provider)
+    if foundation is not None:
+        from foundation_api import register
+        register(app,foundation,scope,allowed)
+    if original_ui:
+        from project_lifecycle import register as register_project_lifecycle
+        register_project_lifecycle(app,db,scope,allowed)
+        from project_export import register as register_project_export
+        register_project_export(app,db,scope,allowed)
+        from original_ui import register as register_original_ui
+        register_original_ui(app)
     return app

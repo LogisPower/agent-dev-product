@@ -1,16 +1,28 @@
 """Bounded local extraction. Results are reviewable drafts, never execution instructions."""
 import json, hashlib, urllib.request
+from local_model_config import BASE_URL, ALIAS, MAX_OUTPUT, REQUEST_SECONDS, verify_backend
 
 class ModelOutputTruncated(ValueError):pass
 class ModelResponseInvalid(ValueError):pass
 
 def local_model(messages):
+    import sys
+    from pathlib import Path
+    builder = Path(__file__).resolve().parents[1]
+    if str(builder) not in sys.path:
+        sys.path.insert(0, str(builder))
+    from inference_gate import inference_slot
+    with inference_slot(builder/'runtime'/'inference.lock', timeout=10):
+        verify_backend()
+        return _local_model(messages)
+
+def _local_model(messages):
     # Leave answer space beyond the installed model's 2048-token reasoning budget.
     # Thinking settings stay under the model server's control.
-    body=json.dumps({'messages':messages,'temperature':0,'max_tokens':4096,'stream':False,
+    body=json.dumps({'messages':messages,'temperature':0,'max_tokens':MAX_OUTPUT,'model':ALIAS,'stream':False,
                      'response_format':{'type':'json_object'}}).encode()
-    request=urllib.request.Request('http://127.0.0.1:8081/v1/chat/completions',data=body,headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(request,timeout=90) as response:
+    request=urllib.request.Request(BASE_URL+'/v1/chat/completions',data=body,headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(request,timeout=REQUEST_SECONDS) as response:
         raw=response.read(256001)
     if len(raw)>256000:raise ModelResponseInvalid('Model response exceeds size limit')
     try:

@@ -22,3 +22,10 @@ rework/recovery/
 rework/rehearsals/
 rework/vector-restore-check/
 rework/*-report.json
+*.pyc
+.backup/
+STAGED-SOURCE.json
+*-test-results.json
+*-browser-proof.*
+*-parity-proof.*
+installation-plan.json
